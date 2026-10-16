@@ -1,0 +1,43 @@
+name: Release
+
+# Run manually from the Actions tab (or `gh workflow run release.yml`).
+# The tag and release name come from "version" in src-tauri/tauri.conf.json.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: NovelCraft v__VERSION__
+          releaseBody: |
+            macOS 版本是 Apple Silicon (arm64) 构建，未签名。拖进「应用程序」后首次打开前执行：
+            `xattr -cr /Applications/novel-craft.app`
+          releaseDraft: true
+          prerelease: false
