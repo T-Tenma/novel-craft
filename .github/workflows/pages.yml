@@ -31,8 +31,8 @@ jobs:
 
       - run: npm ci
 
-      # Project pages are served under /<repo>/, not the domain root
-      - run: npx vite build --base=/novel-craft/
+      # Served at the root of the custom domain (novel.tenma.top), so the default base "/" applies
+      - run: npx vite build
 
       - uses: actions/configure-pages@v5
 
