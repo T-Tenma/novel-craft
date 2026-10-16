@@ -79,7 +79,7 @@ export const Navbar: React.FC = () => {
         {/* 左侧 Logo */}
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 md:w-8 md:h-8 rounded-lg overflow-hidden border border-zinc-800/80 shadow-md shadow-amber-500/10 flex items-center justify-center bg-zinc-950 shrink-0">
-            <img src="/logo.svg" alt="StoryForge Logo" className="w-full h-full object-cover" />
+            <img src={`${import.meta.env.BASE_URL}logo.svg`} alt="StoryForge Logo" className="w-full h-full object-cover" />
           </div>
           <div>
             <h1 className="text-xs md:text-sm font-bold text-zinc-100 tracking-wide flex items-center gap-1.5">
