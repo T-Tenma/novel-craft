@@ -21,7 +21,10 @@ import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useScrollHint } from '../../hooks/useScrollHint';
 import { diagnosisFailureNotice } from '../../utils/diagnosisNotice';
 import { boundTo, type ChapterBound } from '../../utils/chapterBound';
-import { adoptRewrite, shouldRequestCritique } from '../../utils/critique';
+import { adoptRewrite, shouldRequestCritique, nextCritiqueStart, CRITIQUE_BATCH_SIZE } from '../../utils/critique';
+import { buildStoryContext, buildPreviousChapterContext } from '../../utils/storyContext';
+import { polishLengthWarning } from '../../utils/polishCheck';
+import { splitParagraphs } from '../../utils/paragraphs';
 import { findSelectedIdea } from '../../stores/ideaOps';
 import { EditorNotice, UNDO_NOTICE_MS, type EditorNoticeState, type EditorNoticeTone } from './EditorNotice';
 import { NO_API_KEY_MESSAGE, formatActionError } from '../../services/llmErrors';
@@ -135,6 +138,8 @@ export const EditorView: React.FC = () => {
   // 已采纳改写的批注（按段落序号），随新一轮批注清空；已采纳的不能再点，避免重复追加
   const [adoptedCritiques, setAdoptedCritiques] = useState<number[]>([]);
   const [isCritiquing, setIsCritiquing] = useState(false);
+  // 续写方向：作者指定下一段写什么，续写成功后清空
+  const [expandDirection, setExpandDirection] = useState('');
 
   // AI 操作加载状态：改写正文的操作共用一个任务槽（ref 防止同一帧内重复触发）
   const [aiWrite, setAiWrite] = useState<AiWriteTask | null>(null);
@@ -170,6 +175,8 @@ export const EditorView: React.FC = () => {
   const diagnosis = boundTo(diagnosisResult, activeChapterId);
   const consistencyReport = boundTo(consistencyResult, activeChapterId);
   const critiqueList = boundTo(critiqueResult, activeChapterId) ?? [];
+  const critiqueParagraphCount = splitParagraphs(draftContent).length;
+  const nextCritiqueFrom = critiqueList.length > 0 ? nextCritiqueStart(critiqueParagraphCount, critiqueList) : null;
 
   // 编辑角色的局部表单状态
   const [editingCharIdx, setEditingCharIdx] = useState<number | null>(null);
@@ -213,6 +220,17 @@ export const EditorView: React.FC = () => {
 
   const wordCount = draftContent.replace(/\s+/g, '').length;
 
+  // AI 写作带上的前情（本卷大纲、人物与设定、前一章结尾）；读最新 store，快捷键闭包里也不会拿到旧数据
+  const storyContextFor = (chapterId: string) => {
+    const latest = useNovelStore.getState();
+    return buildStoryContext({
+      volumes: latest.volumes,
+      chapterId,
+      characters: latest.myCharacters,
+      worldElements: latest.myWorldElements,
+    });
+  };
+
   const referenceBeatText = currentAnalysis 
     ? `参考章节：${currentAnalysis.chapter_title}\n事件摘要：${currentAnalysis.summary}\n黄金钩子：${currentAnalysis.narrative_hook}\n技法手记：${currentAnalysis.technique_notes}`
     : '遵循网文黄金开局法则：前300字建立致命危机，杜绝说明性灌水，末尾抛出强悬念。';
@@ -234,7 +252,7 @@ export const EditorView: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [draftContent, selectedAuthorStyleId, activeChapterId]);
+  }, [draftContent, selectedAuthorStyleId, activeChapterId, expandDirection]);
 
   // 改写正文的统一入口：结果写回「发起请求时」的章节（期间该章只读），空结果不写入，写入后可撤销一步
   const runAiWrite = async (
@@ -296,7 +314,8 @@ export const EditorView: React.FC = () => {
         draftTitle || '第一章：死局求生',
         referenceBeatText,
         ideaCtx,
-        currentAuthorStyle
+        currentAuthorStyle,
+        storyContextFor(chapterId)
       )
     );
     if (text) handleRunDiagnosis(text, chapterId);
@@ -312,14 +331,20 @@ export const EditorView: React.FC = () => {
       showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
-    await runAiWrite('expand', '续写', 'append', () =>
+    const direction = expandDirection.trim();
+    const text = await runAiWrite('expand', '续写', 'append', () =>
       expandStoryDraft(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftContent,
-        `顺着当前局势推进剧情，完全按照【${currentAuthorStyle.name}】的笔触行文`,
-        currentAuthorStyle
+        direction
+          ? `${direction}（完全按照【${currentAuthorStyle.name}】的笔触行文）`
+          : `顺着当前局势自然推进剧情，完全按照【${currentAuthorStyle.name}】的笔触行文`,
+        currentAuthorStyle,
+        storyContextFor(activeChapterId)
       )
     );
+    // 请求期间作者可能已经在写下一句方向，只清掉刚发出去的那句
+    if (text && direction) setExpandDirection((current) => (current.trim() === direction ? '' : current));
   };
 
   // 3. AI 深度润色 (注入名家文风)
@@ -329,14 +354,21 @@ export const EditorView: React.FC = () => {
       showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
-    await runAiWrite('polish', '润色', 'replace', () =>
+    const original = draftContent;
+    const chapterId = activeChapterId;
+    const text = await runAiWrite('polish', '润色', 'replace', () =>
       polishStoryDraft(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
-        draftContent,
+        original,
         `模仿${currentAuthorStyle.name}风格`,
         currentAuthorStyle
       )
     );
+    // 已切到别的章节时不覆盖「结果已写入发起时的章节」提示，撤销条也只在原章节显示
+    const warning = text ? polishLengthWarning(original, text) : null;
+    if (warning && useNovelStore.getState().activeChapterId === chapterId) {
+      showNotice('info', warning, { durationMs: UNDO_NOTICE_MS });
+    }
   };
 
   // 4. 实时节奏诊断
@@ -376,7 +408,8 @@ export const EditorView: React.FC = () => {
     else setShowCritiqueDrawer(true);
   };
 
-  const handleRunParagraphCritique = async () => {
+  // startParagraph 为 0 是重新批注；大于 0 是接着批下一批，结果追加在已有批注后面
+  const handleRunParagraphCritique = async (startParagraph = 0) => {
     if (!draftContent.trim()) {
       showNotice('info', '请先输入正文');
       return;
@@ -386,20 +419,25 @@ export const EditorView: React.FC = () => {
       return;
     }
     const chapterId = activeChapterId;
+    const previous = startParagraph > 0 ? critiqueList : [];
     setIsCritiquing(true);
-    setCritiqueResult(null);
-    setAdoptedCritiques([]);
+    if (startParagraph === 0) {
+      setCritiqueResult(null);
+      setAdoptedCritiques([]);
+    }
     setShowCritiqueDrawer(true);
     try {
       const results = await critiqueDraftParagraphsWithLLM(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftContent,
         referenceBeatText,
-        currentAuthorStyle
+        currentAuthorStyle,
+        startParagraph
       );
-      setCritiqueResult({ chapterId, data: results });
+      const fresh = results.filter((r) => !previous.some((p) => p.index === r.index));
+      setCritiqueResult({ chapterId, data: [...previous, ...fresh] });
     } catch (err: any) {
-      setShowCritiqueDrawer(false);
+      if (previous.length === 0) setShowCritiqueDrawer(false);
       showNotice('error', formatActionError('主编旁批', err.message));
     } finally {
       setIsCritiquing(false);
@@ -445,7 +483,8 @@ export const EditorView: React.FC = () => {
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftContent,
         myCharacters.map(c => ({ name: c.name, role: c.role, inner_motivation: c.inner_motivation, key_action: c.key_action })),
-        myWorldElements.map(w => ({ term: w.term, category: w.category, description: w.description }))
+        myWorldElements.map(w => ({ term: w.term, category: w.category, description: w.description })),
+        buildPreviousChapterContext(volumes, chapterId)
       );
       setConsistencyResult({ chapterId, data: report });
     } catch (err: any) {
@@ -524,7 +563,8 @@ export const EditorView: React.FC = () => {
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftContent,
         `${promptTemplate}（融入${currentAuthorStyle.name}文风）`,
-        currentAuthorStyle
+        currentAuthorStyle,
+        storyContextFor(activeChapterId)
       )
     );
   };
@@ -988,13 +1028,17 @@ export const EditorView: React.FC = () => {
                             setCharError('');
                             setShowAddChar(true);
                           }}
-                          className="text-zinc-500 hover:text-zinc-300 p-0.5"
+                          aria-label={`编辑人物「${c.name}」`}
+                          title="编辑"
+                          className="text-zinc-500 hover:text-zinc-300 p-1.5 md:p-0.5"
                         >
                           <Edit2 className="w-3 h-3" />
                         </button>
                         <button
                           onClick={() => handleDeleteChar(idx)}
-                          className="text-zinc-500 hover:text-rose-400 p-0.5"
+                          aria-label={`删除人物「${c.name}」`}
+                          title="删除"
+                          className="text-zinc-500 hover:text-rose-400 p-1.5 md:p-0.5"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
@@ -1090,13 +1134,17 @@ export const EditorView: React.FC = () => {
                             setWorldError('');
                             setShowAddWorld(true);
                           }}
-                          className="text-zinc-500 hover:text-zinc-300 p-0.5"
+                          aria-label={`编辑设定「${w.term}」`}
+                          title="编辑"
+                          className="text-zinc-500 hover:text-zinc-300 p-1.5 md:p-0.5"
                         >
                           <Edit2 className="w-3 h-3" />
                         </button>
                         <button
                           onClick={() => handleDeleteWorld(idx)}
-                          className="text-zinc-500 hover:text-rose-400 p-0.5"
+                          aria-label={`删除设定「${w.term}」`}
+                          title="删除"
+                          className="text-zinc-500 hover:text-rose-400 p-1.5 md:p-0.5"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
@@ -1459,7 +1507,34 @@ export const EditorView: React.FC = () => {
               } ${isWritingCurrentChapter ? 'opacity-60 cursor-wait' : ''}`}
             />
 
-            <div className="pt-3 flex items-center justify-between border-t border-zinc-800/60 text-xs text-zinc-500 font-mono">
+            <div className="pt-3 flex items-center gap-2 border-t border-zinc-800/60">
+              <input
+                value={expandDirection}
+                onChange={(e) => setExpandDirection(e.target.value)}
+                onKeyDown={(e) => {
+                  // 输入法确认候选的回车不算：WebKit 里那次 keydown 的 isComposing 已是 false，但 keyCode 为 229
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                    e.preventDefault();
+                    handleExpand();
+                  }
+                }}
+                maxLength={200}
+                aria-label="续写方向"
+                placeholder="续写方向（可选）：下一段写什么，回车续写；留空则顺着剧情写"
+                className="flex-1 min-w-0 bg-zinc-900 border border-zinc-800 focus:border-amber-500/60 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none"
+              />
+              <button
+                onClick={handleExpand}
+                disabled={!!aiWrite}
+                title={aiWriteBusyTitle}
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-md text-xs border border-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              >
+                {isExpanding ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5 text-blue-400" />}
+                <span>续写</span>
+              </button>
+            </div>
+
+            <div className="pt-2 flex items-center justify-between text-xs text-zinc-500 font-mono">
               <span className="flex items-center gap-2">
                 <span>{wordCount} 字</span>
                 <span className="text-amber-400/80 font-sans truncate">✦ {currentAuthorStyle.name}</span>
@@ -1478,7 +1553,7 @@ export const EditorView: React.FC = () => {
                 </div>
                 <div className="flex items-center gap-1">
                   {critiqueList.length > 0 && !isCritiquing && (
-                    <button onClick={handleRunParagraphCritique} className="text-[11px] text-zinc-400 hover:text-amber-300 px-2 py-1 rounded whitespace-nowrap">
+                    <button onClick={() => handleRunParagraphCritique()} className="text-[11px] text-zinc-400 hover:text-amber-300 px-2 py-1 rounded whitespace-nowrap">
                       重新批注
                     </button>
                   )}
@@ -1487,7 +1562,7 @@ export const EditorView: React.FC = () => {
               </div>
 
               <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
-                {isCritiquing ? (
+                {isCritiquing && critiqueList.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-2 p-6">
                     <Loader2 className="w-6 h-6 animate-spin text-amber-400" />
                     <p className="text-xs">主编正在逐段进行毒辣批注与精修...</p>
@@ -1549,6 +1624,30 @@ export const EditorView: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {/* 每次批 CRITIQUE_BATCH_SIZE 段：说明批到了哪里，没批完的可以接着批 */}
+              {critiqueList.length > 0 && (
+                <div className="border-t border-zinc-800 bg-zinc-950 px-3 py-2 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
+                  {isCritiquing ? (
+                    <span className="flex items-center gap-1.5 text-amber-300">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>主编正在批注后面的段落…</span>
+                    </span>
+                  ) : nextCritiqueFrom === null ? (
+                    <span>全章 {critiqueParagraphCount} 段已批注完</span>
+                  ) : (
+                    <>
+                      <span>已批注到第 {nextCritiqueFrom} 段，共 {critiqueParagraphCount} 段</span>
+                      <button
+                        onClick={() => handleRunParagraphCritique(nextCritiqueFrom)}
+                        className="px-2.5 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold whitespace-nowrap"
+                      >
+                        继续批注第 {nextCritiqueFrom + 1}–{Math.min(nextCritiqueFrom + CRITIQUE_BATCH_SIZE, critiqueParagraphCount)} 段
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </aside>
           )}
         </div>

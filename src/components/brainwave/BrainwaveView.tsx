@@ -143,8 +143,9 @@ export const BrainwaveView: React.FC = () => {
         {/* 预设生成表单 */}
         <div className="p-3 border-b border-zinc-800/80 bg-zinc-950/60 space-y-2.5 text-xs">
           <div>
-            <label className="block text-[11px] font-medium text-zinc-400 mb-1">目标新题材</label>
+            <label htmlFor="brainwave-genre" className="block text-[11px] font-medium text-zinc-400 mb-1">目标新题材</label>
             <input
+              id="brainwave-genre"
               type="text"
               value={genreInput}
               onChange={(e) => setGenreInput(e.target.value)}
@@ -154,8 +155,9 @@ export const BrainwaveView: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-[11px] font-medium text-zinc-400 mb-1">迁移的剧情骨架</label>
+            <label htmlFor="brainwave-skeleton" className="block text-[11px] font-medium text-zinc-400 mb-1">迁移的剧情骨架</label>
             <textarea
+              id="brainwave-skeleton"
               rows={3}
               value={skeletonInput}
               onChange={(e) => setSkeletonInput(e.target.value)}

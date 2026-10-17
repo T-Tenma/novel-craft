@@ -22,3 +22,12 @@ export function adoptRewrite(content: string, originalSnippet: string, suggestio
 export function shouldRequestCritique(hasResults: boolean, drawerOpen: boolean): boolean {
   return !hasResults || drawerOpen;
 }
+
+// 主编旁批每次批注的段数；一章几十段时分批往下批
+export const CRITIQUE_BATCH_SIZE = 10;
+
+// 下一批从哪一段开始（0 起）；已批到章末返回 null。按已批注的最大段号算，批次里被模型跳过的段不再重复请求
+export function nextCritiqueStart(paragraphCount: number, critiqued: ReadonlyArray<{ index: number }>): number | null {
+  const covered = critiqued.reduce((max, item) => Math.max(max, item.index), 0);
+  return covered < paragraphCount ? covered : null;
+}

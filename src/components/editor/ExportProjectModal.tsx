@@ -36,8 +36,8 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
     }
     volumes.forEach(v => {
       text += `\n====================================\n`;
+      // 分卷简介多是「采用此大纲」写入的策划大纲（金手指、三幕节拍），不进可投稿的纯正文；Markdown 存档版保留
       text += `${v.title}\n`;
-      if (v.description) text += `【本卷简介】：${v.description}\n`;
       text += `====================================\n\n`;
 
       v.chapters.forEach(c => {

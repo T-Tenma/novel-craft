@@ -156,8 +156,9 @@ export const ReviewView: React.FC = () => {
 
         {/* 快速选择小说目录树中的章节 */}
         <div>
-          <label className="block text-[11px] text-zinc-400 mb-1">选择送审章节</label>
+          <label htmlFor="review-chapter-select" className="block text-[11px] text-zinc-400 mb-1">选择送审章节</label>
           <select
+            id="review-chapter-select"
             value={activeChapterId}
             onChange={(e) => setActiveChapterId(e.target.value)}
             disabled={isReviewing}

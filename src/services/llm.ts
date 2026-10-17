@@ -14,9 +14,17 @@ import {
   normalizeChapterAnalysis,
 } from './normalize.ts';
 import { splitParagraphs, buildNumberedChapterText } from '../utils/paragraphs.ts';
+import { excerptHeadTail } from '../utils/storyContext.ts';
+import { CRITIQUE_BATCH_SIZE } from '../utils/critique.ts';
 
 const CONNECTION_TEST_TIMEOUT_MS = 30_000;
+const countChars = (text: string) => text.replace(/\s+/g, '').length;
 const CHAPTER_PROMPT_MAX_CHARS = 6000;
+const DIAGNOSIS_MAX_CHARS = 3000;
+const CONSISTENCY_MAX_CHARS = 6000;
+// 润色后篇幅允许的浮动范围（相对原文）
+const POLISH_MIN_RATIO = 0.85;
+const POLISH_MAX_RATIO = 1.15;
 const INVALID_RESPONSE_MESSAGE = '模型服务返回的内容不是 OpenAI 兼容格式，请检查 Base URL 是否指向 /v1 接口';
 
 export interface LLMCallOptions {
@@ -291,9 +299,11 @@ export async function critiqueDraftParagraphsWithLLM(
   config: LLMConfig,
   draftContent: string,
   referenceStyle?: string,
-  authorStyle?: AuthorStyle
+  authorStyle?: AuthorStyle,
+  startParagraph = 0
 ): Promise<DraftParagraphCritique[]> {
-  const paragraphs = draftContent.split(/\n+/).map(p => p.trim()).filter(Boolean);
+  // 每次批一批（startParagraph 起的 CRITIQUE_BATCH_SIZE 段），模型按批内 1 起编号，返回后换算成全章段号
+  const paragraphs = splitParagraphs(draftContent).slice(startParagraph, startParagraph + CRITIQUE_BATCH_SIZE);
   if (paragraphs.length === 0) return [];
 
   const styleContext = authorStyle 
@@ -304,7 +314,7 @@ export async function critiqueDraftParagraphsWithLLM(
 作者正在进行针对特定名家文风的仿写实践。
 ${styleContext}
 
-请对作者正文中的每个自然段（最多前10段）进行【专业主编逐段旁批】：
+请对下面列出的每个自然段进行【专业主编逐段旁批】：
 1. 评定等级：'优秀·黄金段' | '合格·推进平稳' | '硬伤·拖沓灌水' | '出戏·人设矛盾'；
 2. 主编点评：极其一针见血，毫不客气地指出这段写得好在何处，或者存在什么废话、说明文倒灌、动机不清等硬伤，尤其是是否具备所选作家的神髓；
 3. 精修改写建议：若有不足，给出 1-2 句完全符合该白金作家笔触的高质感改写示范！rewrite_suggestion 会被直接替换进正文，只写改写后的正文，不加任何前缀标签。
@@ -320,7 +330,7 @@ ${styleContext}
   }
 ]`;
 
-  const userPrompt = `待点评正文段落列表：\n${JSON.stringify(paragraphs.slice(0, 10))}`;
+  const userPrompt = `待点评正文段落列表：\n${JSON.stringify(paragraphs)}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
   let parsed: unknown;
@@ -329,9 +339,17 @@ ${styleContext}
   } catch {
     throw new Error('主编旁批结果解析失败，请重试');
   }
+  // 模型给的段号超出本批范围（0 起编号、用了全章段号）或重复时，按回复顺序编号，免得和其他批撞号或误判已批到哪
+  const used = new Set<number>();
   const items = (Array.isArray(parsed) ? parsed : [])
     .map((item, i) => normalizeParagraphCritique(item, i + 1))
-    .filter((item): item is DraftParagraphCritique => item !== null);
+    .filter((item): item is DraftParagraphCritique => item !== null)
+    .map((item, i) => {
+      const valid = item.index >= 1 && item.index <= paragraphs.length && !used.has(item.index);
+      const local = valid ? item.index : i + 1;
+      used.add(local);
+      return { ...item, index: local + startParagraph };
+    });
   if (items.length === 0) throw new Error('主编旁批结果为空，请重试');
   return items;
 }
@@ -429,7 +447,8 @@ export async function generateInspirationDraft(
   title: string,
   referenceBeat: string,
   ideaContext?: string,
-  authorStyle?: AuthorStyle
+  authorStyle?: AuthorStyle,
+  storyContext = ''
 ): Promise<string> {
   const styleInstruction = authorStyle
     ? `【必须严格模仿作家·${authorStyle.name}（${authorStyle.tone_tag}）的行文神韵】\n${authorStyle.stylistic_guideline}`
@@ -443,9 +462,11 @@ ${styleInstruction}
 写作通用原则：
 1. 坚决杜绝开头倒灌设定说明文，前三句话直接将主角推进致命危机或强烈冲突的第一现场！
 2. 调动感官细节（光线、气味、生理刺痛、冷汗），营造强烈的沉浸感与压迫感。
-3. 行文末尾必须留下一个让读者不得不翻下一页的致命悬念（Hook）！直接输出小说正文。`;
+3. 行文末尾必须留下一个让读者不得不翻下一页的致命悬念（Hook）！${storyContext ? `
+4. 这是接续前文的一章：开头要接上前一章结尾，人名、称谓、地名、道具与规则一律沿用【前情与设定】，不要另起炉灶，也不要给人物改名。` : ''}
+直接输出小说正文。`;
 
-  const userPrompt = `章节标题：${title}\n立项脑洞背景：${ideaContext || '赛博修真/现代超自然悬疑'}\n参考的名作结构与节拍：\n${referenceBeat}\n\n请直接输出小说正文：`;
+  const userPrompt = `${storyContext ? `【前情与设定】\n${storyContext}\n\n` : ''}章节标题：${title}\n立项脑洞背景：${ideaContext || '赛博修真/现代超自然悬疑'}\n参考的名作结构与节拍：\n${referenceBeat}\n\n请直接输出小说正文：`;
 
   // 正文类输出会直接写进章节，推理模型的思考过程必须去掉
   return stripThinking(await callLLM(config, systemPrompt, userPrompt));
@@ -455,8 +476,9 @@ ${styleInstruction}
 export async function expandStoryDraft(
   config: LLMConfig,
   context: string,
-  instruction: string = '顺着当前局势推进剧情，强化危机或抛出新线索',
-  authorStyle?: AuthorStyle
+  instruction: string = '顺着当前局势自然推进剧情',
+  authorStyle?: AuthorStyle,
+  storyContext = ''
 ): Promise<string> {
   const stylePrompt = authorStyle
     ? `文风限定：完全按照【${authorStyle.name}】的笔触与叙事逻辑续写（${authorStyle.tone_tag}）。\n${authorStyle.stylistic_guideline}`
@@ -464,9 +486,13 @@ export async function expandStoryDraft(
 
   const systemPrompt = `你是一位资深网络小说家。请基于作者当前写好的上下文，自然、连贯地向下续写展开 400-600 字。
 ${stylePrompt}
-要求：保持既有文风与人称，推进剧情动作，不要突兀转折，在续写段落中埋下一个细微线索或冲突加剧点。直接输出续写正文。`;
+要求：
+1. 保持既有文风与人称，紧接上文最后一句往下写，推进剧情动作，不要突兀转折。
+2. 作者给了续写指令时，这一段严格按指令写。
+3. 人名、称谓、地名、道具与规则以上文和【前情与设定】为准；不要擅自引入设定里没有的新势力、新组织或新的主线谜团，可以在已有矛盾上加压。
+直接输出续写正文。`;
 
-  const userPrompt = `当前已有正文：\n${context.slice(-2500)}\n\n作者续写指令：${instruction}`;
+  const userPrompt = `${storyContext ? `【前情与设定】\n${storyContext}\n\n` : ''}当前已有正文：\n${context.slice(-2500)}\n\n作者续写指令：${instruction}`;
 
   return stripThinking(await callLLM(config, systemPrompt, userPrompt));
 }
@@ -479,17 +505,23 @@ export async function polishStoryDraft(
   authorStyle?: AuthorStyle
 ): Promise<string> {
   const stylePrompt = authorStyle
-    ? `精修目标：将以下文本彻底改写润色为【${authorStyle.name}】的招牌文风！\n${authorStyle.stylistic_guideline}`
+    ? `精修目标：将以下文本润色为【${authorStyle.name}】的招牌文风。\n${authorStyle.stylistic_guideline}`
     : `润色偏好：${stylePreference}`;
+  const length = countChars(textToPolish);
+  const minLength = Math.round(length * POLISH_MIN_RATIO);
+  const maxLength = Math.round(length * POLISH_MAX_RATIO);
 
   const systemPrompt = `你是一位千万级畅销小说的金牌文字总监。
 请对作者提交的文本段落进行精修润色：
 ${stylePrompt}
 1. 删去臃肿干瘪的说明性词汇，用更精准动感的动词和冷峻的感官描写代替。
 2. 强化潜台词与心理张力，做到“Show, Don't Tell”。
-3. 保持原剧情脉络不变，大幅提升文学表现力与网文节奏感。直接输出润色后的正文。`;
+3. 保持原剧情脉络不变，提升文学表现力与网文节奏感。
+4. 原文 ${length} 字，润色后控制在 ${minLength}–${maxLength} 字之间，不新增情节、人物和设定。
+5. 人名、地名、称谓、数字、时间、道具与功法名称照抄原文，不得改动。
+直接输出润色后的正文。`;
 
-  const userPrompt = `待润色正文：\n${textToPolish}`;
+  const userPrompt = `待润色正文（${length} 字，润色后不超过 ${maxLength} 字，宁短勿长）：\n${textToPolish}`;
 
   return stripThinking(await callLLM(config, systemPrompt, userPrompt));
 }
@@ -515,9 +547,11 @@ export async function diagnoseDraftRealtime(
   "hook_detected": true,
   "pacing_status": "节奏紧凑",
   "instant_feedback": "前200字危机到位，但第3段出现了较长的世界观说明，建议精简并转化为主角的动作观察。"
-}`;
+}
+判断章末钩子（hook_detected）和断章时，以正文最后一段为准。`;
 
-  const userPrompt = `参考的目标节奏与手法：\n${referenceBeat}\n\n作者当前正文（前 2000 字）：\n${currentDraft.slice(0, 2000)}`;
+  const truncated = currentDraft.length > DIAGNOSIS_MAX_CHARS;
+  const userPrompt = `参考的目标节奏与手法：\n${referenceBeat}\n\n作者当前正文（共 ${countChars(currentDraft)} 字${truncated ? '，过长已省略中段，最后一段即章末' : ''}）：\n${excerptHeadTail(currentDraft, DIAGNOSIS_MAX_CHARS)}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
   let parsed: unknown;
@@ -607,13 +641,15 @@ export async function checkDraftConsistency(
   config: LLMConfig,
   draftContent: string,
   characters: Array<{ name: string; role: string; inner_motivation: string; key_action: string }>,
-  worldElements: Array<{ term: string; category: string; description: string }>
+  worldElements: Array<{ term: string; category: string; description: string }>,
+  storyContext = ''
 ): Promise<ConsistencyCheckReport> {
   const systemPrompt = `你是一位专注于小说剧情严密性与防“吃设定”的首席总编审。
 请将作者提交的正文内容，与作者维护的【新书人设矩阵】和【世界观规则设定】进行交叉比对，严格排查：
 1. 角色言行是否与核心动机、身份定位相背离（如：谨慎内敛的主角突然无脑降智装逼）？
 2. 是否违背了力量法则机制或金手指代价（如：设定了用一次扣除情感算力，但正文无视代价随意连续开挂）？
 3. 是否存在前后逻辑冲突或道具机制自相矛盾？
+注意：人设矩阵和世界观只记录了部分信息。正文里出现、设定里没写的人物、道具或事件，可能是前文已经交代过的，不要仅因设定里没写就判为冲突；只报告与给出的设定、前文结尾或本章前后文明确矛盾的地方。
 
 严格以纯 JSON 格式输出（无 markdown 反引号）：
 {
@@ -631,7 +667,8 @@ export async function checkDraftConsistency(
   "overall_summary": "一句话总评，概括人设与设定一致性表现"
 }`;
 
-  const userPrompt = `【维护的人设矩阵】：\n${JSON.stringify(characters.slice(0, 10))}\n\n【维护的世界观规则】：\n${JSON.stringify(worldElements.slice(0, 10))}\n\n【待检测正文】：\n${draftContent.slice(0, 4000)}`;
+  const truncated = draftContent.length > CONSISTENCY_MAX_CHARS;
+  const userPrompt = `${storyContext ? `${storyContext}\n\n` : ''}【维护的人设矩阵】：\n${JSON.stringify(characters.slice(0, 10))}\n\n【维护的世界观规则】：\n${JSON.stringify(worldElements.slice(0, 10))}\n\n【待检测正文】${truncated ? '（过长已省略中段）' : ''}：\n${excerptHeadTail(draftContent, CONSISTENCY_MAX_CHARS)}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
   let parsed: unknown;

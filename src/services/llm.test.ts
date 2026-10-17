@@ -6,6 +6,9 @@ import {
   critiqueDraftParagraphsWithLLM,
   diagnoseDraftRealtime,
   checkDraftConsistency,
+  expandStoryDraft,
+  generateInspirationDraft,
+  polishStoryDraft,
 } from './llm.ts';
 import { FAMOUS_AUTHOR_STYLES } from '../data/authorStyles.ts';
 
@@ -116,4 +119,87 @@ test('FAMOUS_AUTHOR_STYLES - has valid entries and guidelines', () => {
     assert.ok(author.name);
     assert.ok(author.stylistic_guideline.length > 50);
   }
+});
+
+// 截获发给模型的请求，检查提示词里真正带了什么
+async function captureRequest(reply: string, run: () => Promise<unknown>) {
+  const original = globalThis.fetch;
+  let body: { messages: Array<{ content: string }> } | null = null;
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ choices: [{ message: { content: reply } }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await run();
+    assert.ok(body, 'request was sent');
+    const sent = body as { messages: Array<{ content: string }> };
+    return { result, system: sent.messages[0].content, user: sent.messages[1].content };
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+const STORY_CONTEXT = '【前一章《第一章》结尾】\n门外的手指抠了进来。';
+
+test('expandStoryDraft - sends the story context and the author direction, and no longer asks for a new conflict every time', async () => {
+  const { system, user } = await captureRequest('续写正文', () =>
+    expandStoryDraft(CONFIG, '上文', '让裴照先开口摊牌', undefined, STORY_CONTEXT));
+  assert.match(user, /门外的手指抠了进来/);
+  assert.match(user, /让裴照先开口摊牌/);
+  assert.doesNotMatch(system, /埋下一个细微线索或冲突加剧点/);
+  assert.match(system, /不要[^。]*新势力/);
+});
+
+test('generateInspirationDraft - a later chapter picks up from the previous one', async () => {
+  const { system, user } = await captureRequest('初稿', () =>
+    generateInspirationDraft(CONFIG, '第二章', '节拍', '', undefined, STORY_CONTEXT));
+  assert.match(user, /门外的手指抠了进来/);
+  assert.match(system, /接上前一章/);
+});
+
+test('polishStoryDraft - pins the length and the proper nouns of the original', async () => {
+  const { system, user } = await captureRequest('润色稿', () => polishStoryDraft(CONFIG, '字'.repeat(2000)));
+  assert.match(system + user, /2000 字/);
+  assert.match(system, /1700[^0-9]+2300/);
+  assert.match(system, /人名[^。]*时间[^。]*不得改动/);
+});
+
+test('diagnoseDraftRealtime - a long chapter is judged with its ending, not only its first 2000 characters', async () => {
+  const draft = '开头'.repeat(1500) + '这是章末的钩子。';
+  const { user } = await captureRequest(JSON.stringify({ match_score: 80, tension_score: 7, instant_feedback: 'ok' }), () =>
+    diagnoseDraftRealtime(CONFIG, draft, '参考'));
+  assert.match(user, /这是章末的钩子。/);
+  assert.match(user, /共 3008 字/);
+});
+
+test('checkDraftConsistency - checks the end of long chapters and tells the model what came before', async () => {
+  const draft = '甲'.repeat(7000) + '最后一段出了问题。';
+  const { system, user } = await captureRequest(JSON.stringify({ consistency_score: 90, conflicts: [] }), () =>
+    checkDraftConsistency(CONFIG, draft, [], [], STORY_CONTEXT));
+  assert.match(user, /最后一段出了问题。/);
+  assert.match(user, /门外的手指抠了进来/);
+  assert.match(system, /前文/);
+});
+
+test('critiqueDraftParagraphsWithLLM - a later batch critiques the next paragraphs and keeps chapter-wide numbering', async () => {
+  const draft = Array.from({ length: 25 }, (_, i) => `第${i + 1}段内容。`).join('\n');
+  const reply = JSON.stringify([{ index: 1, paragraph_text: '第11段内容。', grade: '合格', editor_comment: '平' }]);
+  const { result, user } = await captureRequest(reply, () => critiqueDraftParagraphsWithLLM(CONFIG, draft, '', undefined, 10));
+  assert.match(user, /第11段内容。/);
+  assert.match(user, /第20段内容。/);
+  assert.doesNotMatch(user, /第10段内容。|第21段内容。/);
+  assert.equal((result as Array<{ index: number }>)[0].index, 11);
+});
+
+test('critiqueDraftParagraphsWithLLM - out-of-range or repeated model indexes fall back to reply order, so batches never collide', async () => {
+  const draft = Array.from({ length: 25 }, (_, i) => `第${i + 1}段内容。`).join('\n');
+  const reply = JSON.stringify([
+    { index: 0, paragraph_text: '第11段内容。', grade: '合格', editor_comment: '零起编号' },
+    { index: 15, paragraph_text: '第12段内容。', grade: '合格', editor_comment: '用了全章段号' },
+    { index: 3, paragraph_text: '第13段内容。', grade: '合格', editor_comment: '正常' },
+    { index: 3, paragraph_text: '第14段内容。', grade: '合格', editor_comment: '重复' },
+  ]);
+  const { result } = await captureRequest(reply, () => critiqueDraftParagraphsWithLLM(CONFIG, draft, '', undefined, 10));
+  const indexes = (result as Array<{ index: number }>).map((r) => r.index);
+  assert.deepEqual(indexes, [11, 12, 13, 14]);
 });
