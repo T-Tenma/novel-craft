@@ -1,5 +1,5 @@
 // 「AI 拆细纲」的范围：这本书在本卷之前写到哪（前情），本卷哪些章节还没写（细纲填进去），新细纲从第几章编号
-import type { BrainwaveIdea, CharacterItem, StoryChapter, StoryVolume, WorldElement } from '../types';
+import type { BrainwaveIdea, ChapterPlan, CharacterItem, StoryChapter, StoryVolume, WorldElement } from '../types';
 import { unwrittenTail } from '../stores/chapterOps.ts';
 import { bookVolumesOf, buildCardContext, buildRecap } from './storyContext.ts';
 
@@ -34,6 +34,28 @@ export function buildPlanContext(scope: PlanScope, characters: CharacterItem[], 
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+const DIGITS = '零一二三四五六七八九';
+const UNITS = ['', '十', '百', '千'];
+
+// 章号写成汉字：6 → 六，105 → 一百零五（一万以内）
+export function toChineseNumber(n: number): string {
+  if (n < 20) return n < 10 ? DIGITS[n] : `十${n % 10 ? DIGITS[n % 10] : ''}`;
+  const digits = String(n).split('').map(Number);
+  return digits
+    .map((d, i) => (d ? `${digits[i - 1] === 0 ? '零' : ''}${DIGITS[d]}${UNITS[digits.length - 1 - i]}` : ''))
+    .join('');
+}
+
+const ARABIC_NUMBERED = /^第\s*(\d{1,4})\s*章/;
+const CHINESE_NUMBERED = /^第[零〇一二三四五六七八九十百千两]+章/;
+
+// 提示里写的是「从第 6 章开始」，模型常照抄成「第6章」；本书前面用汉字编号时改成同样的写法
+export function matchChapterNumbering(plans: ChapterPlan[], earlier: StoryChapter[]): ChapterPlan[] {
+  const reference = [...earlier].reverse().find((c) => ARABIC_NUMBERED.test(c.title.trim()) || CHINESE_NUMBERED.test(c.title.trim()));
+  if (!reference || !CHINESE_NUMBERED.test(reference.title.trim())) return plans;
+  return plans.map((p) => ({ ...p, title: p.title.replace(ARABIC_NUMBERED, (_, n: string) => `第${toChineseNumber(Number(n))}章`) }));
 }
 
 // 选中的脑洞当全书大纲

@@ -5,7 +5,7 @@ import { chapterTitleOrDefault, findChapter } from '../../stores/chapterOps';
 import { findSelectedIdea } from '../../stores/ideaOps';
 import { planChapters, summarizeChapter } from '../../services/storyPlanning';
 import { NO_API_KEY_MESSAGE, formatActionError } from '../../services/llmErrors';
-import { buildPlanContext, describeIdea, planScope } from '../../utils/chapterPlan';
+import { buildPlanContext, describeIdea, matchChapterNumbering, planScope } from '../../utils/chapterPlan';
 import { chaptersNeedingSummary } from '../../utils/chapterSummary';
 import { buildCardContext } from '../../utils/storyContext';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
@@ -118,7 +118,7 @@ export const OutlinePlannerModal: React.FC<Props> = ({ volumeId, onClose, onAppl
         },
         controller.signal,
       );
-      setPlans(result);
+      setPlans(matchChapterNumbering(result, scope.earlier));
     } catch (err: any) {
       if (!controller.signal.aborted) setError(formatActionError('拆细纲', err.message));
     } finally {
@@ -130,9 +130,13 @@ export const OutlinePlannerModal: React.FC<Props> = ({ volumeId, onClose, onAppl
     setPlans((list) => list?.map((p, i) => (i === index ? { ...p, ...patch } : p)) ?? null);
 
   const handleApply = () => {
-    const kept = (plans ?? [])
-      .filter((p) => p.outline.trim())
-      .map((p, i) => ({ title: p.title.trim() || `第 ${scope.startNumber + i} 章`, outline: p.outline.trim() }));
+    // 清空了章名的用默认编号，同样跟随本书的编号写法
+    const kept = matchChapterNumbering(
+      (plans ?? [])
+        .filter((p) => p.outline.trim())
+        .map((p, i) => ({ title: p.title.trim() || `第 ${scope.startNumber + i} 章`, outline: p.outline.trim() })),
+      scope.earlier,
+    );
     if (kept.length === 0) return setError('细纲都是空的，先写上内容或重新生成');
     const replaced = scope.slots.slice(0, kept.length).filter((c) => c.outline);
     if (replaced.length > 0 && !confirm(`${replaced.map((c) => `「${chapterTitleOrDefault(c.title)}」`).join('')}原有的细纲会被替换，继续吗？`)) return;

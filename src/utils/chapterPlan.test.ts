@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planScope, buildPlanContext, describeIdea } from './chapterPlan.ts';
+import { planScope, buildPlanContext, describeIdea, matchChapterNumbering, toChineseNumber } from './chapterPlan.ts';
 import { hashText } from './chapterSummary.ts';
 import type { BrainwaveIdea, StoryChapter, StoryVolume } from '../types';
 
@@ -67,3 +67,26 @@ test('describeIdea - the selected idea as the book outline; nothing when none is
   assert.equal(describeIdea(null), '');
 });
 
+
+test('toChineseNumber - chapter numbers as written in titles', () => {
+  const cases: [number, string][] = [[1, '一'], [10, '十'], [15, '十五'], [20, '二十'], [36, '三十六'], [105, '一百零五'], [110, '一百一十'], [1010, '一千零一十'], [2000, '二千']];
+  for (const [n, text] of cases) assert.equal(toChineseNumber(n), text, `${n}`);
+});
+
+test('matchChapterNumbering - Arabic numbers from the model follow the book when it numbers chapters in Chinese', () => {
+  const titled = (id: string, title: string): StoryChapter => ({ ...chapter(id, '正文'), title });
+  const plans = [
+    { title: '第6章 代首死债', outline: '甲' },
+    { title: '第 7 章', outline: '乙' },
+    { title: '第八章 禁地重开', outline: '丙' },
+    { title: '番外 雨夜', outline: '丁' },
+  ];
+  assert.deepEqual(
+    matchChapterNumbering(plans, [titled('a', '第四章 诛绝禁制'), titled('b', '第五章 空城禅让')]).map((p) => p.title),
+    ['第六章 代首死债', '第七章', '第八章 禁地重开', '番外 雨夜'],
+  );
+  assert.equal(matchChapterNumbering(plans, [titled('a', '第五章 空城禅让'), titled('b', '尾声')])[0].title, '第六章 代首死债', 'the latest numbered title decides');
+  assert.deepEqual(matchChapterNumbering(plans, [titled('a', '第5章 空城禅让')]), plans, 'a book numbered in Arabic keeps them');
+  assert.deepEqual(matchChapterNumbering(plans, []), plans, 'nothing to follow before the first chapter');
+  assert.equal(plans[0].title, '第6章 代首死债', 'the input is not changed');
+});
