@@ -1,1 +1,84 @@
 @import "tailwindcss";
+
+/* 进场动画（原先写的 animate-in / slide-in-from-* 属于未安装的 tailwindcss-animate 插件，从未生效） */
+@theme {
+  --animate-fade-in: fade-in 0.2s ease-out;
+  --animate-slide-in-bottom: slide-in-bottom 0.22s ease-out;
+  --animate-slide-in-right: slide-in-right 0.22s ease-out;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes slide-in-bottom {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+  @keyframes slide-in-right {
+    from { transform: translateX(100%); }
+    to { transform: translateX(0); }
+  }
+}
+
+/* 交互状态的统一默认值。放在 base 层：组件上已有的 focus:outline-none、disabled:opacity-40 等工具类优先 */
+@layer base {
+  /* 键盘聚焦显示琥珀色焦点框，替代浏览器默认蓝框；鼠标点击不显示 */
+  :focus-visible {
+    outline: 2px solid var(--color-amber-500);
+    outline-offset: 2px;
+  }
+  /* 禁用的按钮一眼可辨：半透明 + 禁止光标 */
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+  /* 触屏没有 hover，按下时稍微变暗作为反馈 */
+  button:not(:disabled):active {
+    filter: brightness(0.9);
+  }
+}
+
+/* 手机底部导航：可见高度 3.5rem，另加 iPhone 底部手势条安全区；各视图底部留白与导航栏共用这一个值 */
+@utility h-mobile-nav {
+  height: calc(3.5rem + env(safe-area-inset-bottom));
+}
+@utility pb-mobile-nav {
+  padding-bottom: calc(3.5rem + env(safe-area-inset-bottom));
+}
+
+/* 手机宽度或触屏设备上输入控件至少 16px：iOS Safari 聚焦小于 16px 的输入框会自动放大页面。
+   放在 @layer 之外，才能压过组件上的 text-xs 等工具类 */
+@media (max-width: 767px), (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
+/* 手机 / 触屏上纯图标按钮与 ✕ 关闭按钮的可点区域至少 36×36（图标本身不变）。
+   同样放在 @layer 之外以压过 p-0.5 等工具类；flex 按钮需显式居中，否则图标会贴左 */
+@media (max-width: 767px), (pointer: coarse) {
+  button:has(> svg:only-child),
+  button[aria-label^="关闭"] {
+    min-width: 36px;
+    min-height: 36px;
+    justify-content: center;
+  }
+}
+
+/* 手机 / 触屏上带文字的按钮、分段标签、小标签与下拉框高度至少 36px，宽度保持内容宽 */
+@media (max-width: 767px), (pointer: coarse) {
+  button,
+  select,
+  [role='button'] {
+    min-height: 36px;
+  }
+}
+
+/* 正文、拆解结果、审稿报告等内容默认可选中复制；按钮文字不可选，避免手机长按按钮时误选中 */
+button,
+[role='button'] {
+  -webkit-user-select: none;
+  user-select: none;
+}

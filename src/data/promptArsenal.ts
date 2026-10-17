@@ -1,4 +1,4 @@
-import { TechniquePrompt } from '../types';
+import type { TechniquePrompt } from '../types';
 
 export const DEFAULT_PROMPT_ARSENAL: TechniquePrompt[] = [
   // 1. 氛围渲染 (Atmosphere)

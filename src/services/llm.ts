@@ -1,5 +1,26 @@
 import type { ChapterAnalysis, BrainwaveIdea, ReviewReport, ParagraphAnalysis, DraftParagraphCritique } from '../types';
 import type { AuthorStyle } from '../data/authorStyles';
+import { fetchTextWithRetry } from './http.ts';
+import { stripThinking } from './thinking.ts';
+import { describeHttpError, describeNetworkError, isNetworkError } from './llmErrors.ts';
+import {
+  normalizeBrainwaveIdea,
+  normalizeReviewReport,
+  normalizeParagraphCritique,
+  normalizeDiagnosis,
+  normalizeConsistencyReport,
+  normalizeParagraphAnalysis,
+  normalizeChapterAnalysis,
+} from './normalize.ts';
+import { splitParagraphs, buildNumberedChapterText } from '../utils/paragraphs.ts';
+
+const CONNECTION_TEST_TIMEOUT_MS = 30_000;
+const CHAPTER_PROMPT_MAX_CHARS = 6000;
+const INVALID_RESPONSE_MESSAGE = '模型服务返回的内容不是 OpenAI 兼容格式，请检查 Base URL 是否指向 /v1 接口';
+
+export interface LLMCallOptions {
+  signal?: AbortSignal;
+}
 
 export interface LLMConfig {
   baseUrl: string;
@@ -26,7 +47,7 @@ function buildChatUrl(baseUrl: string): string {
 // 健壮的 JSON 提取与解析辅助函数（兼容各家大模型，如 DeepSeek-R1 思考链、代码块反引号、前后缀说明文等）
 export function extractAndParseJson<T = any>(raw: string, fallback?: T): T {
   // 1. 去除 <think>...</think> 思考链内容 (如 DeepSeek-R1)
-  let cleaned = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  let cleaned = stripThinking(raw);
 
   // 2. 优先提取 ```json ... ``` 或 ``` ... ``` 中的内容
   const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -66,37 +87,37 @@ export function extractAndParseJson<T = any>(raw: string, fallback?: T): T {
 export async function callLLM(
   config: LLMConfig,
   systemPrompt: string,
-  userPrompt: string
+  userPrompt: string,
+  options: LLMCallOptions = {}
 ): Promise<string> {
   const url = buildChatUrl(config.baseUrl);
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0.7,
-    }),
-  });
+  let response;
+  try {
+    response = await fetchTextWithRetry(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.7,
+      }),
+    }, { signal: options.signal });
+  } catch (err) {
+    if (isNetworkError(err)) throw new Error(describeNetworkError(url));
+    throw err;
+  }
 
-  const rawText = await response.text();
+  const rawText = response.text;
 
   if (!response.ok) {
-    let errDetail = rawText;
-    try {
-      const errJson = JSON.parse(rawText);
-      errDetail = errJson.error?.message || errJson.message || JSON.stringify(errJson);
-    } catch {
-      // 保留 rawText
-    }
-    throw new Error(`LLM 响应异常 (HTTP ${response.status}): ${errDetail}`);
+    throw new Error(describeHttpError(response.status, rawText));
   }
 
   try {
@@ -104,16 +125,17 @@ export async function callLLM(
     const content = data.choices?.[0]?.message?.content || '';
     return content;
   } catch {
-    throw new Error('LLM 响应不是合法的 JSON 数据');
+    throw new Error(INVALID_RESPONSE_MESSAGE);
   }
 }
+
 
 export async function testLLMConnection(config: LLMConfig): Promise<{ success: boolean; message: string; duration: number }> {
   const startTime = Date.now();
   const url = buildChatUrl(config.baseUrl);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetchTextWithRetry(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -125,22 +147,15 @@ export async function testLLMConnection(config: LLMConfig): Promise<{ success: b
         max_tokens: 15,
         temperature: 0.1,
       }),
-    });
+    }, { maxRetries: 0, timeoutMs: CONNECTION_TEST_TIMEOUT_MS });
 
     const duration = Date.now() - startTime;
-    const rawText = await response.text();
+    const rawText = response.text;
 
     if (!response.ok) {
-      let errDetail = rawText;
-      try {
-        const errJson = JSON.parse(rawText);
-        errDetail = errJson.error?.message || errJson.message || JSON.stringify(errJson);
-      } catch {
-        // 使用原 rawText
-      }
       return {
         success: false,
-        message: `HTTP ${response.status} 错误: ${errDetail || response.statusText} (请求地址: ${url})`,
+        message: `${describeHttpError(response.status, rawText)}（请求地址：${url}）`,
         duration,
       };
     }
@@ -156,16 +171,13 @@ export async function testLLMConnection(config: LLMConfig): Promise<{ success: b
     } catch {
       return {
         success: false,
-        message: `接口返回了非 JSON 格式内容: ${rawText.slice(0, 100)}`,
+        message: `${INVALID_RESPONSE_MESSAGE}（返回内容：${rawText.slice(0, 100)}）`,
         duration,
       };
     }
   } catch (err: any) {
     const duration = Date.now() - startTime;
-    let msg = err.message || '网络连接失败';
-    if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
-      msg = `无法访问该接口 (${url})。常见原因：1. 本地代理服务未启动；2. 跨域 CORS 拦截；3. 端口错误。`;
-    }
+    const msg = isNetworkError(err) ? describeNetworkError(url) : err.message || '网络连接失败';
     return {
       success: false,
       message: msg,
@@ -178,11 +190,13 @@ export async function testLLMConnection(config: LLMConfig): Promise<{ success: b
 export async function analyzeChapterWithLLM(
   config: LLMConfig,
   chapterTitle: string,
-  chapterContent: string
+  chapterContent: string,
+  options: LLMCallOptions = {}
 ): Promise<ChapterAnalysis> {
   const systemPrompt = `你是一位顶级网文与出版畅销小说的金牌主编兼小说解构大师。
 请针对给定的单章文本进行硬核、深度逆向拆解。
 【核心要求】：优秀小说的核心技巧都藏在具体段落与句式间。除了全章宏观概括外，必须提取本章 4-8 个最关键的代表性自然段进行【段落级显微镜分析与专业总编毒辣点评】！
+【段落编号】：正文每个自然段前已标注编号 [n]，paragraph_analyses 中的 index 必须使用该编号，paragraph_excerpt 必须逐字摘自该段开头；超长章节的中间部分已省略，只分析给出的段落。
 严格以纯 JSON 格式输出（不要包含 markdown 代码块反引号，直接输出纯 JSON），字段定义如下：
 {
   "summary": "100字以内的核心剧情事件脉络",
@@ -218,29 +232,21 @@ export async function analyzeChapterWithLLM(
   ]
 }`;
 
-  const userPrompt = `章节标题：${chapterTitle}\n\n章节正文如下（前 5000 字）：\n${chapterContent.slice(0, 5000)}`;
+  const numberedText = buildNumberedChapterText(splitParagraphs(chapterContent), CHAPTER_PROMPT_MAX_CHARS);
+  const userPrompt = `章节标题：${chapterTitle}\n\n章节正文如下（已按自然段编号）：\n${numberedText}`;
 
-  const raw = await callLLM(config, systemPrompt, userPrompt);
+  const raw = await callLLM(config, systemPrompt, userPrompt, options);
 
+  let parsed: unknown;
   try {
-    const parsed = extractAndParseJson<any>(raw);
-    return {
-      chapter_id: 0,
-      chapter_title: chapterTitle,
-      summary: parsed.summary || '无剧情概括',
-      tension_score: typeof parsed.tension_score === 'number' ? parsed.tension_score : 5,
-      narrative_hook: parsed.narrative_hook || '未检测到明确钩子',
-      characters: parsed.characters || [],
-      world_elements: parsed.world_elements || [],
-      technique_notes: parsed.technique_notes || '',
-      paragraph_analyses: (parsed.paragraph_analyses || []).map((p: any) => ({
-        ...p,
-        editor_comment: p.editor_comment || '行文老辣紧凑，牢牢卡准了读者的情绪期待点。'
-      })),
-    };
+    parsed = extractAndParseJson<unknown>(raw);
   } catch {
     throw new Error('解析大模型返回的 JSON 结构失败，请重试');
   }
+  // 结构校验见 normalizeChapterAnalysis：缺剧情概括或张力分时报错重试，不编造分数与点评
+  const analysis = normalizeChapterAnalysis(parsed, chapterTitle);
+  if (!analysis) throw new Error('拆解结果不完整（缺少剧情概括或张力分），请重试');
+  return analysis;
 }
 
 // 针对用户选中的原著特定段落进行实时微观解剖与总编点评
@@ -265,26 +271,15 @@ export async function analyzeSelectedParagraph(
   const userPrompt = `【章节上下文】：\n${chapterContext.slice(0, 1000)}\n\n【选中的段落】：\n${paragraphText}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
-  const fallback = {
-    index: 0,
-    paragraph_excerpt: paragraphText.slice(0, 30),
-    role_type: '人物动作' as const,
-    technique: '白描与细节刻画',
-    purpose: '推进角色动作与现场情境',
-    psychological_effect: '增强临场真实感',
-    editor_comment: '镜头感极强，前推式动词有效避免了枯燥陈述。',
-  };
-
-  const parsed = extractAndParseJson<any>(raw, fallback);
-  return {
-    index: 0,
-    paragraph_excerpt: paragraphText.slice(0, 30),
-    role_type: parsed.role_type || fallback.role_type,
-    technique: parsed.technique || fallback.technique,
-    purpose: parsed.purpose || fallback.purpose,
-    psychological_effect: parsed.psychological_effect || fallback.psychological_effect,
-    editor_comment: parsed.editor_comment || fallback.editor_comment,
-  };
+  let parsed: unknown;
+  try {
+    parsed = extractAndParseJson<unknown>(raw);
+  } catch {
+    throw new Error('段落剖析结果解析失败，请重试');
+  }
+  const analysis = normalizeParagraphAnalysis(parsed, paragraphText);
+  if (!analysis) throw new Error('段落剖析结果不完整（缺少点评），请重试');
+  return analysis;
 }
 
 // 仿写创作台——AI 专业主编逐段旁批与精修示范（注入名家文风）
@@ -324,20 +319,17 @@ ${styleContext}
   const userPrompt = `待点评正文段落列表：\n${JSON.stringify(paragraphs.slice(0, 10))}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
-  const fallbackList = paragraphs.slice(0, 6).map((p, i) => ({
-    index: i + 1,
-    paragraph_text: p.slice(0, 30),
-    grade: (i === 0 ? '优秀·黄金段' : '合格·推进平稳') as DraftParagraphCritique['grade'],
-    editor_comment: '整体推进流畅，可进一步减少形容词堆砌，增强动词冲击力。',
-    rewrite_suggestion: '精简修饰语，强化镜头画面感。'
-  }));
-
+  let parsed: unknown;
   try {
-    const list = extractAndParseJson<any>(raw, fallbackList);
-    return Array.isArray(list) ? list : fallbackList;
+    parsed = extractAndParseJson<unknown>(raw);
   } catch {
-    return fallbackList;
+    throw new Error('主编旁批结果解析失败，请重试');
   }
+  const items = (Array.isArray(parsed) ? parsed : [])
+    .map((item, i) => normalizeParagraphCritique(item, i + 1))
+    .filter((item): item is DraftParagraphCritique => item !== null);
+  if (items.length === 0) throw new Error('主编旁批结果为空，请重试');
+  return items;
 }
 
 // 脑洞推演生成
@@ -366,20 +358,15 @@ export async function generateBrainwaveWithLLM(
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
 
+  let parsed: unknown;
   try {
-    const parsed = extractAndParseJson<any>(raw);
-    return {
-      id: `idea-${Date.now()}`,
-      title: parsed.title,
-      genre: parsed.genre,
-      source_skeleton: parsed.source_skeleton,
-      golden_finger: parsed.golden_finger,
-      main_conflict: parsed.main_conflict,
-      three_act_beats: parsed.three_act_beats,
-    };
+    parsed = extractAndParseJson<unknown>(raw);
   } catch {
     throw new Error('脑洞生成 JSON 格式解析失败');
   }
+  const idea = normalizeBrainwaveIdea(parsed, `idea-${Date.now()}`);
+  if (!idea) throw new Error('脑洞生成结果不完整（缺少书名或核心设定），请重试');
+  return idea;
 }
 
 // 审稿打分
@@ -419,11 +406,15 @@ export async function reviewDraftWithLLM(
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
 
+  let parsed: unknown;
   try {
-    return extractAndParseJson<ReviewReport>(raw);
+    parsed = extractAndParseJson<unknown>(raw);
   } catch {
     throw new Error('审稿报告 JSON 解析失败');
   }
+  const report = normalizeReviewReport(parsed);
+  if (!report) throw new Error('审稿报告不完整（缺少总分或五维评分），请重试');
+  return report;
 }
 
 // 🌟 仿写创作台伴写能力：深度注入名家文风 🌟
@@ -452,7 +443,8 @@ ${styleInstruction}
 
   const userPrompt = `章节标题：${title}\n立项脑洞背景：${ideaContext || '赛博修真/现代超自然悬疑'}\n参考的名作结构与节拍：\n${referenceBeat}\n\n请直接输出小说正文：`;
 
-  return await callLLM(config, systemPrompt, userPrompt);
+  // 正文类输出会直接写进章节，推理模型的思考过程必须去掉
+  return stripThinking(await callLLM(config, systemPrompt, userPrompt));
 }
 
 // 2. AI 智能续写 (注入名家文风)
@@ -472,7 +464,7 @@ ${stylePrompt}
 
   const userPrompt = `当前已有正文：\n${context.slice(-2500)}\n\n作者续写指令：${instruction}`;
 
-  return await callLLM(config, systemPrompt, userPrompt);
+  return stripThinking(await callLLM(config, systemPrompt, userPrompt));
 }
 
 // 3. AI 感官与张力深度润色 (注入名家文风)
@@ -495,7 +487,7 @@ ${stylePrompt}
 
   const userPrompt = `待润色正文：\n${textToPolish}`;
 
-  return await callLLM(config, systemPrompt, userPrompt);
+  return stripThinking(await callLLM(config, systemPrompt, userPrompt));
 }
 
 export interface RealtimeDiagnosis {
@@ -524,19 +516,15 @@ export async function diagnoseDraftRealtime(
   const userPrompt = `参考的目标节奏与手法：\n${referenceBeat}\n\n作者当前正文（前 2000 字）：\n${currentDraft.slice(0, 2000)}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
-  const fallback: RealtimeDiagnosis = {
-    match_score: 75,
-    tension_score: 6,
-    hook_detected: true,
-    pacing_status: '节奏紧凑',
-    instant_feedback: '正文推进顺畅，可进一步加深细节动作描写。',
-  };
-
+  let parsed: unknown;
   try {
-    return extractAndParseJson<RealtimeDiagnosis>(raw, fallback);
+    parsed = extractAndParseJson<unknown>(raw);
   } catch {
-    return fallback;
+    throw new Error('节奏诊断结果解析失败，请重试');
   }
+  const diagnosis = normalizeDiagnosis(parsed);
+  if (!diagnosis) throw new Error('节奏诊断结果不完整（缺少评分），请重试');
+  return diagnosis;
 }
 
 export interface AssetMappingResult {
@@ -642,16 +630,13 @@ export async function checkDraftConsistency(
   const userPrompt = `【维护的人设矩阵】：\n${JSON.stringify(characters.slice(0, 10))}\n\n【维护的世界观规则】：\n${JSON.stringify(worldElements.slice(0, 10))}\n\n【待检测正文】：\n${draftContent.slice(0, 4000)}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
-  const fallback: ConsistencyCheckReport = {
-    is_consistent: true,
-    consistency_score: 90,
-    conflicts: [],
-    overall_summary: '正文与人设及世界观设定基本保持一致，未见明显吃设定漏洞。',
-  };
-
+  let parsed: unknown;
   try {
-    return extractAndParseJson<ConsistencyCheckReport>(raw, fallback);
+    parsed = extractAndParseJson<unknown>(raw);
   } catch {
-    return fallback;
+    throw new Error('一致性排查结果解析失败，请重试');
   }
+  const report = normalizeConsistencyReport(parsed);
+  if (!report) throw new Error('一致性排查结果不完整（缺少评分），请重试');
+  return report;
 }

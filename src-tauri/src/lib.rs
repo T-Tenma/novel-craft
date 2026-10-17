@@ -83,6 +83,12 @@ fn db_get_novel_report(
     storage::get_novel_report(&conn, &novel_id).map_err(|e| format!("生成全景分析报告失败: {}", e))
 }
 
+#[tauri::command]
+fn db_delete_novel(state: tauri::State<DbState>, novel_id: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    storage::delete_novel(&conn, &novel_id).map_err(|e| format!("从书库删除小说失败: {}", e))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -93,7 +99,13 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("./data"));
             let db_path = app_data_dir.join("novel_craft.db");
-            app.manage(DbState::new(db_path));
+            // 数据库不可用时不注册 DbState：db_* 命令会返回错误，前端 db.ts 自动降级到 localStorage
+            match DbState::new(db_path) {
+                Ok(state) => {
+                    app.manage(state);
+                }
+                Err(e) => eprintln!("SQLite 不可用，已降级为前端本地存储: {}", e),
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -104,7 +116,8 @@ pub fn run() {
             db_list_novels,
             db_get_chapters,
             db_update_chapter_analysis,
-            db_get_novel_report
+            db_get_novel_report,
+            db_delete_novel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

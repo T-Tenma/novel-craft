@@ -77,12 +77,13 @@ export interface BrainwaveIdea {
 // 审稿评分报告
 export interface ReviewReport {
   score_overall: number; // 总评分 (0-100)
+  // 各维度 0-100；模型漏给的维度为 null（显示「未评」，不当作 0 分）
   radar: {
-    hook_strength: number; // 开篇黄金钩子 (0-100)
-    pacing_tension: number; // 节奏与张力曲线 (0-100)
-    character_arc: number; // 人设辨识度与动机 (0-100)
-    curiosity_gap: number; // 悬念留白与伏笔 (0-100)
-    trope_freshness: number; // 设定新颖度与毒点规避 (0-100)
+    hook_strength: number | null; // 开篇黄金钩子
+    pacing_tension: number | null; // 节奏与张力曲线
+    character_arc: number | null; // 人设辨识度与动机
+    curiosity_gap: number | null; // 悬念留白与伏笔
+    trope_freshness: number | null; // 设定新颖度与毒点规避
   };
   pros: string[]; // 亮点优势
   cons: string[]; // 致命毒点/拖沓点

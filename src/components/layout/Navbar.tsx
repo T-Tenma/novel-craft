@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNovelStore, ActiveTab } from '../../stores/novelStore';
 import { testLLMConnection } from '../../services/llm';
+import { validateModelConfig, type ModelConfigField } from '../../utils/modelConfig';
 import { 
   BookOpen, 
   Sparkles, 
@@ -11,17 +12,42 @@ import {
   CheckCircle2, 
   AlertCircle, 
   Loader2,
-  Cpu
+  Cpu,
+  X
 } from 'lucide-react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+
+// 输入框下方提示：错误（红）优先于警告（琥珀）
+const FieldHint: React.FC<{ id: string; error?: string; warning?: string }> = ({ id, error, warning }) => {
+  if (!error && !warning) return null;
+  return (
+    <p id={id} className={`mt-1 text-[11px] leading-relaxed ${error ? 'text-rose-400' : 'text-amber-400/90'}`}>
+      {error ?? warning}
+    </p>
+  );
+};
 
 export const Navbar: React.FC = () => {
   const { activeTab, setActiveTab, apiBaseUrl, apiKey, modelName, setApiConfig } = useNovelStore();
   const [showSettings, setShowSettings] = useState(false);
+  const settingsDialogRef = useFocusTrap<HTMLDivElement>(showSettings, () => setShowSettings(false));
   const [baseUrlInput, setBaseUrlInput] = useState(apiBaseUrl);
   const [keyInput, setKeyInput] = useState(apiKey);
   const [modelInput, setModelInput] = useState(modelName);
 
   const [testing, setTesting] = useState(false);
+  const [showValidation, setShowValidation] = useState(false);
+  const validation = validateModelConfig({ baseUrl: baseUrlInput, apiKey: keyInput, model: modelInput });
+  const fieldError = (field: ModelConfigField) => (showValidation ? validation.errors[field] : undefined);
+
+  // 校验不通过时显示错误并聚焦第一个有问题的输入框
+  const ensureValid = () => {
+    setShowValidation(true);
+    if (validation.ok) return true;
+    const firstInvalid = (['baseUrl', 'apiKey', 'model'] as const).find((f) => validation.errors[f]);
+    if (firstInvalid) document.getElementById(`model-config-${firstInvalid}`)?.focus();
+    return false;
+  };
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const navItems: { id: ActiveTab; label: string; shortLabel: string; icon: React.ReactNode; desc: string }[] = [
@@ -32,18 +58,12 @@ export const Navbar: React.FC = () => {
   ];
 
   const handleTestConnection = async () => {
-    if (!keyInput.trim()) {
-      setTestResult({ success: false, message: '请先填写 API Key 密钥' });
-      return;
-    }
+    if (!ensureValid()) return;
     setTesting(true);
     setTestResult(null);
     try {
-      const res = await testLLMConnection({
-        baseUrl: baseUrlInput.trim(),
-        apiKey: keyInput.trim(),
-        model: modelInput.trim() || 'deepseek-chat',
-      });
+      // 与保存使用同一份校验后的配置，测试通过即代表保存后可用
+      const res = await testLLMConnection(validation.value);
       setTestResult(res);
     } catch (err: any) {
       setTestResult({ success: false, message: err.message || '网络请求异常' });
@@ -53,7 +73,9 @@ export const Navbar: React.FC = () => {
   };
 
   const handleSaveSettings = () => {
-    setApiConfig(baseUrlInput.trim(), keyInput.trim(), modelInput.trim());
+    if (!ensureValid()) return;
+    const { baseUrl, apiKey: key, model } = validation.value;
+    setApiConfig(baseUrl, key, model);
     setShowSettings(false);
   };
 
@@ -85,9 +107,9 @@ export const Navbar: React.FC = () => {
             <h1 className="text-xs md:text-sm font-bold text-zinc-100 tracking-wide flex items-center gap-1.5">
               <span>StoryForge</span>
               <span className="hidden sm:inline">故事工坊</span>
-              <span className="text-[9px] bg-gradient-to-r from-amber-500/20 to-purple-500/20 text-amber-300 border border-amber-500/30 px-1 py-0.2 rounded font-mono">Pro</span>
+              <span className="text-[10px] bg-gradient-to-r from-amber-500/20 to-purple-500/20 text-amber-300 border border-amber-500/30 px-1 py-px rounded font-mono">Pro</span>
             </h1>
-            <p className="text-[10px] text-zinc-400 hidden sm:block">逆向解构 ➔ 骨架迁移 ➔ 仿写实战 ➔ AI 审稿</p>
+            <p className="text-[10px] text-zinc-400 hidden lg:block">逆向解构 ➔ 骨架迁移 ➔ 仿写实战 ➔ AI 审稿</p>
           </div>
         </div>
 
@@ -106,7 +128,9 @@ export const Navbar: React.FC = () => {
                 }`}
               >
                 {item.icon}
-                <span>{item.label}</span>
+                {/* 平板宽度用短标签，避免四个 Tab 折成两行 */}
+                <span className="lg:hidden whitespace-nowrap">{item.shortLabel}</span>
+                <span className="hidden lg:inline whitespace-nowrap">{item.label}</span>
               </button>
             );
           })}
@@ -120,6 +144,7 @@ export const Navbar: React.FC = () => {
               setKeyInput(apiKey);
               setModelInput(modelName);
               setTestResult(null);
+              setShowValidation(false);
               setShowSettings(true);
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1 md:py-1.5 text-xs rounded-md border transition-all ${
@@ -137,7 +162,7 @@ export const Navbar: React.FC = () => {
       </header>
 
       {/* 🌟 核心新功能：手机端原生级底部磨砂导航栏 (Mobile Bottom Bar) 🌟 */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 h-14 bg-zinc-900/95 backdrop-blur-md border-t border-zinc-800 flex items-center justify-around z-40 px-2 pb-[env(safe-area-inset-bottom)]">
+      <div className="md:hidden fixed bottom-0 left-0 right-0 h-mobile-nav bg-zinc-900/95 backdrop-blur-md border-t border-zinc-800 flex items-center justify-around z-40 px-2 pb-[env(safe-area-inset-bottom)]">
         {navItems.map((item) => {
           const isActive = activeTab === item.id;
           return (
@@ -160,17 +185,25 @@ export const Navbar: React.FC = () => {
       {/* 模型设置弹窗 (全自适应，手机端大屏友好) */}
       {showSettings && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full p-5 md:p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+          <div
+            ref={settingsDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="model-settings-title"
+            tabIndex={-1}
+            className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full p-5 md:p-6 shadow-2xl space-y-4 max-h-[90dvh] overflow-y-auto focus:outline-none"
+          >
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-              <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+              <h3 id="model-settings-title" className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
                 <Settings className="w-4 h-4 text-amber-400" />
                 大语言模型设置 (BYOM)
               </h3>
               <button
                 onClick={() => setShowSettings(false)}
-                className="text-zinc-400 hover:text-zinc-200 text-sm p-1"
+                aria-label="关闭模型设置"
+                className="text-zinc-400 hover:text-zinc-200 p-1"
               >
-                ✕
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -207,38 +240,54 @@ export const Navbar: React.FC = () => {
 
             <div className="space-y-3 text-xs">
               <div>
-                <label className="block text-zinc-300 font-medium mb-1">
-                  API Base URL
-                </label>
+                <label htmlFor="model-config-baseUrl" className="block text-zinc-300 font-medium mb-1">API Base URL</label>
                 <input
+                  id="model-config-baseUrl"
                   type="text"
                   value={baseUrlInput}
                   onChange={(e) => setBaseUrlInput(e.target.value)}
                   placeholder="https://api.deepseek.com/v1 或 http://127.0.0.1:8045"
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-zinc-200 focus:outline-none focus:border-amber-500 font-mono text-xs"
+                  aria-invalid={!!fieldError('baseUrl')}
+                  aria-describedby="model-config-baseUrl-hint"
+                  className={`w-full bg-zinc-950 border rounded-md px-3 py-2 text-zinc-200 focus:outline-none font-mono text-xs ${
+                    fieldError('baseUrl') ? 'border-rose-500/60 focus:border-rose-400' : 'border-zinc-800 focus:border-amber-500'
+                  }`}
                 />
+                <FieldHint id="model-config-baseUrl-hint" error={fieldError('baseUrl')} warning={validation.warnings.baseUrl} />
               </div>
 
               <div>
-                <label className="block text-zinc-300 font-medium mb-1">API Key</label>
+                <label htmlFor="model-config-apiKey" className="block text-zinc-300 font-medium mb-1">API Key</label>
                 <input
+                  id="model-config-apiKey"
                   type="password"
                   value={keyInput}
                   onChange={(e) => setKeyInput(e.target.value)}
                   placeholder="sk-..."
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-zinc-200 focus:outline-none focus:border-amber-500 font-mono text-xs"
+                  aria-invalid={!!fieldError('apiKey')}
+                  aria-describedby="model-config-apiKey-hint"
+                  className={`w-full bg-zinc-950 border rounded-md px-3 py-2 text-zinc-200 focus:outline-none font-mono text-xs ${
+                    fieldError('apiKey') ? 'border-rose-500/60 focus:border-rose-400' : 'border-zinc-800 focus:border-amber-500'
+                  }`}
                 />
+                <FieldHint id="model-config-apiKey-hint" error={fieldError('apiKey')} warning={validation.warnings.apiKey} />
               </div>
 
               <div>
-                <label className="block text-zinc-300 font-medium mb-1">模型名称 (Model)</label>
+                <label htmlFor="model-config-model" className="block text-zinc-300 font-medium mb-1">模型名称 (Model)</label>
                 <input
+                  id="model-config-model"
                   type="text"
                   value={modelInput}
                   onChange={(e) => setModelInput(e.target.value)}
                   placeholder="deepseek-chat / gpt-4o / gpt-4o-mini"
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-zinc-200 focus:outline-none focus:border-amber-500 font-mono text-xs"
+                  aria-invalid={!!fieldError('model')}
+                  aria-describedby="model-config-model-hint"
+                  className={`w-full bg-zinc-950 border rounded-md px-3 py-2 text-zinc-200 focus:outline-none font-mono text-xs ${
+                    fieldError('model') ? 'border-rose-500/60 focus:border-rose-400' : 'border-zinc-800 focus:border-amber-500'
+                  }`}
                 />
+                <FieldHint id="model-config-model-hint" error={fieldError('model')} warning={validation.warnings.model} />
               </div>
             </div>
 

@@ -1,7 +1,65 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractAndParseJson } from './llm.ts';
+import {
+  extractAndParseJson,
+  analyzeSelectedParagraph,
+  critiqueDraftParagraphsWithLLM,
+  diagnoseDraftRealtime,
+  checkDraftConsistency,
+} from './llm.ts';
 import { FAMOUS_AUTHOR_STYLES } from '../data/authorStyles.ts';
+
+const CONFIG = { baseUrl: 'http://llm.test/v1', apiKey: 'k', model: 'm' };
+
+async function withModelReply(content: string, run: () => Promise<void>) {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 })) as typeof fetch;
+  try {
+    await run();
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+// 解析失败时必须报错，不能返回写死的「优秀 / 75% / 通过 90 分」等假结果
+const UNPARSEABLE = '抱歉，我无法完成这个请求。';
+const fakeResultCases: Array<[string, () => Promise<unknown>]> = [
+  ['analyzeSelectedParagraph', () => analyzeSelectedParagraph(CONFIG, '痛！好痛！', '上下文')],
+  ['critiqueDraftParagraphsWithLLM', () => critiqueDraftParagraphsWithLLM(CONFIG, '第一段。\n第二段。')],
+  ['diagnoseDraftRealtime', () => diagnoseDraftRealtime(CONFIG, '正文', '参考')],
+  ['checkDraftConsistency', () => checkDraftConsistency(CONFIG, '正文', [], [])],
+];
+
+for (const [name, call] of fakeResultCases) {
+  test(`${name} - rejects instead of returning a canned result when the reply is not JSON`, () =>
+    withModelReply(UNPARSEABLE, async () => {
+      await assert.rejects(call, /请重试/);
+    }));
+}
+
+test('callLLM-based features - an HTTP 401 surfaces an actionable message instead of the raw status', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ error: { message: 'invalid api key' } }), { status: 401 })) as typeof fetch;
+  try {
+    await assert.rejects(() => diagnoseDraftRealtime(CONFIG, '正文', '参考'), /API Key.*模型设置/);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('diagnoseDraftRealtime - JSON without scores is rejected too', () =>
+  withModelReply('{"instant_feedback":"不错"}', async () => {
+    await assert.rejects(() => diagnoseDraftRealtime(CONFIG, '正文', '参考'), /请重试/);
+  }));
+
+test('critiqueDraftParagraphsWithLLM - a valid reply is returned as-is (normalized)', () =>
+  withModelReply('[{"paragraph_text":"第一段","grade":"优秀·黄金段","editor_comment":"好"}]', async () => {
+    const list = await critiqueDraftParagraphsWithLLM(CONFIG, '第一段。');
+    assert.equal(list.length, 1);
+    assert.equal(list[0].editor_comment, '好');
+  }));
 
 test('extractAndParseJson - parses standard JSON object', () => {
   const input = '{"title":"测试小说","score":95}';

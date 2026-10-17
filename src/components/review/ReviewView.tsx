@@ -1,6 +1,11 @@
 import React, { useState } from 'react';
 import { useNovelStore } from '../../stores/novelStore';
 import { reviewDraftWithLLM } from '../../services/llm';
+import { getReviewGrade, formatRadarScore } from '../../utils/reviewGrade';
+import { getChapterReview } from '../../utils/chapterReview';
+import { copyText } from '../../utils/clipboard';
+import { chapterTitleOrDefault } from '../../stores/chapterOps';
+import { NO_API_KEY_MESSAGE, formatActionError } from '../../services/llmErrors';
 import { 
   CheckCircle2, 
   AlertTriangle, 
@@ -11,15 +16,16 @@ import {
   Copy,
   BookOpen,
   Sliders,
-  FileCheck
+  FileCheck,
+  Loader2
 } from 'lucide-react';
 
 export const ReviewView: React.FC = () => {
   const { 
     draftTitle, 
     draftContent, 
-    reviewReport, 
-    setReviewReport, 
+    reviewReports, 
+    setChapterReview, 
     isReviewing, 
     setIsReviewing,
     volumes,
@@ -33,7 +39,10 @@ export const ReviewView: React.FC = () => {
   } = useNovelStore();
 
   const [errorMsg, setErrorMsg] = useState('');
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'done' | 'failed'>('idle');
+  const chapterReview = getChapterReview(reviewReports, activeChapterId, draftContent);
+  const reviewReport = chapterReview?.report ?? null;
+  const reviewGrade = reviewReport ? getReviewGrade(reviewReport.score_overall) : null;
   // 🌟 手机端视图切换: 'config' (章节选择与触发) | 'report' (诊断评估报告) 🌟
   const [mobileTab, setMobileTab] = useState<'config' | 'report'>('config');
 
@@ -42,14 +51,17 @@ export const ReviewView: React.FC = () => {
 
   const handleStartReview = async () => {
     if (!draftContent.trim()) {
-      alert('请先在仿写创作台中输入或选择章节正文！');
+      setErrorMsg('所选章节还没有正文，请先在仿写创作台写一些内容再送审');
       return;
     }
     if (!apiKey) {
-      alert('请先在右上角【配置模型 API】配置密钥并测试连通性');
+      setErrorMsg(NO_API_KEY_MESSAGE);
       return;
     }
 
+    // 报告写回发起审稿时的章节：等待期间切到其他章节，也不会把结论记到别的章节上
+    const chapterId = activeChapterId;
+    const reviewedContent = draftContent;
     setIsReviewing(true);
     setErrorMsg('');
     try {
@@ -61,29 +73,30 @@ export const ReviewView: React.FC = () => {
         draftContent,
         contextHint
       );
-      setReviewReport(report);
+      setChapterReview(chapterId, { report, reviewedContent });
       if (window.innerWidth < 768) {
         setMobileTab('report');
       }
     } catch (err: any) {
-      setErrorMsg(err.message || '审稿失败');
+      setErrorMsg(formatActionError('AI 审稿', err.message));
     } finally {
       setIsReviewing(false);
     }
   };
 
   // 导出完整的审稿报告与改稿批注
-  const handleExportFullReview = () => {
+  const handleExportFullReview = async () => {
     if (!reviewReport) return;
     let md = `# 📋 《${draftTitle || '未命名章节'}》AI 商业专家审稿与诊断报告\n\n`;
-    md += `> 综合评分：${reviewReport.score_overall} / 100 分  | 判定等级：${reviewReport.score_overall >= 80 ? '👑 S 级爆款潜力' : '📈 A 级商业连载'}\n\n`;
+    const grade = getReviewGrade(reviewReport.score_overall);
+    md += `> 综合评分：${reviewReport.score_overall} / 100 分  | 判定等级：${grade.tier} 级 · ${grade.headline}\n\n`;
     
     md += `## 📊 商业潜质五维拆解\n`;
-    md += `- **黄金开篇钩子强度**：${reviewReport.radar.hook_strength} / 100\n`;
-    md += `- **剧情推进与张力密度**：${reviewReport.radar.pacing_tension} / 100\n`;
-    md += `- **主角人设辨识度与动机**：${reviewReport.radar.character_arc} / 100\n`;
-    md += `- **悬念留白与追读欲望**：${reviewReport.radar.curiosity_gap} / 100\n`;
-    md += `- **设定新鲜度与毒点规避**：${reviewReport.radar.trope_freshness} / 100\n\n`;
+    md += `- **黄金开篇钩子强度**：${formatRadarScore(reviewReport.radar.hook_strength)}\n`;
+    md += `- **剧情推进与张力密度**：${formatRadarScore(reviewReport.radar.pacing_tension)}\n`;
+    md += `- **主角人设辨识度与动机**：${formatRadarScore(reviewReport.radar.character_arc)}\n`;
+    md += `- **悬念留白与追读欲望**：${formatRadarScore(reviewReport.radar.curiosity_gap)}\n`;
+    md += `- **设定新鲜度与毒点规避**：${formatRadarScore(reviewReport.radar.trope_freshness)}\n\n`;
 
     md += `## 🌟 亮眼优势 (Pros)\n`;
     reviewReport.pros.forEach(p => md += `- ${p}\n`);
@@ -97,13 +110,13 @@ export const ReviewView: React.FC = () => {
     reviewReport.revision_suggestions.forEach(s => md += `1. ${s}\n`);
     md += `\n---\n*由 NovelCraft 审稿评估室自动生成*`;
 
-    navigator.clipboard.writeText(md);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    const ok = await copyText(md);
+    setCopyState(ok ? 'done' : 'failed');
+    setTimeout(() => setCopyState('idle'), ok ? 2000 : 4000);
   };
 
   return (
-    <div className="flex-1 flex flex-col md:flex-row overflow-hidden bg-zinc-950 text-zinc-100 pb-14 md:pb-0">
+    <div className="flex-1 flex flex-col md:flex-row overflow-hidden bg-zinc-950 text-zinc-100 pb-mobile-nav md:pb-0">
       {/* 🌟 手机端顶部分段切换器 🌟 */}
       <div className="md:hidden flex items-center justify-around bg-zinc-900 border-b border-zinc-800 p-1.5 shrink-0 z-20">
         <button
@@ -147,11 +160,12 @@ export const ReviewView: React.FC = () => {
           <select
             value={activeChapterId}
             onChange={(e) => setActiveChapterId(e.target.value)}
-            className="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs text-zinc-200 focus:outline-none focus:border-amber-500"
+            disabled={isReviewing}
+            className="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-xs text-zinc-200 focus:outline-none focus:border-amber-500 disabled:opacity-50"
           >
             {allChapters.map(ch => (
               <option key={ch.id} value={ch.id}>
-                {ch.volumeTitle} · {ch.title} ({ch.word_count}字)
+                {ch.volumeTitle} · {chapterTitleOrDefault(ch.title)} ({ch.word_count}字)
               </option>
             ))}
           </select>
@@ -166,13 +180,22 @@ export const ReviewView: React.FC = () => {
           <span>{isReviewing ? 'AI 专家团队多维盲审中...' : '开始 AI 商业审稿'}</span>
         </button>
 
+        {/* 错误紧跟在触发按钮下方：手机端报告面板默认隐藏，放在那里用户看不到 */}
+        {errorMsg && (
+          <div role="alert" className="p-3 rounded bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
+            {errorMsg}
+          </div>
+        )}
+
         {reviewReport && (
           <button
             onClick={handleExportFullReview}
             className="w-full py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-xs flex items-center justify-center gap-1.5 transition-colors"
           >
-            {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            <span>{copied ? '已复制整篇诊断报告' : '一键导出审稿报告'}</span>
+            {copyState === 'done' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+            <span aria-live="polite" className={copyState === 'failed' ? 'text-rose-300' : undefined}>
+              {copyState === 'done' ? '已复制整篇诊断报告' : copyState === 'failed' ? '复制失败，请手动选中复制' : '一键导出审稿报告'}
+            </span>
           </button>
         )}
 
@@ -186,33 +209,39 @@ export const ReviewView: React.FC = () => {
       <main className={`flex-1 overflow-y-auto p-4 md:p-6 bg-zinc-950 ${
         mobileTab === 'report' ? 'block' : 'hidden md:block'
       }`}>
-        {errorMsg && (
-          <div className="mb-4 p-3 rounded bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
-            {errorMsg}
+        {isReviewing ? (
+          <div className="h-full flex flex-col items-center justify-center text-zinc-400 text-xs space-y-3" role="status">
+            <Loader2 className="w-8 h-8 animate-spin text-amber-400" />
+            <p className="font-semibold text-zinc-300">AI 专家团队正在多维盲审本章…</p>
+            <p className="text-zinc-500">通常需要 20–40 秒，完成后报告会显示在这里</p>
           </div>
-        )}
-
-        {reviewReport ? (
+        ) : reviewReport ? (
           <div className="max-w-3xl mx-auto space-y-6">
+            {chapterReview?.isStale && (
+              <div role="status" className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs">
+                审稿后本章正文有改动，以下报告基于改动前的稿件，建议重新审稿
+              </div>
+            )}
+
             {/* 综合得分横幅 */}
-            <div className="p-6 rounded-2xl bg-gradient-to-r from-zinc-900 via-amber-950/20 to-zinc-900 border border-amber-500/20 flex items-center justify-between">
-              <div>
+            <div className="p-4 sm:p-6 rounded-2xl bg-gradient-to-r from-zinc-900 via-amber-950/20 to-zinc-900 border border-amber-500/20 flex items-center justify-between gap-4">
+              <div className="min-w-0">
                 <span className="text-xs text-amber-400 font-mono tracking-widest uppercase">
                   AI 商业终审综合评级
                 </span>
-                <h2 className="text-2xl font-bold text-zinc-100 mt-1">
-                  {reviewReport.score_overall >= 80 ? '👑 达到 S 级商业连载标准' : '📈 具有出版/连载潜力，需精修微调'}
+                <h2 className="text-xl sm:text-2xl font-bold text-zinc-100 mt-1">
+                  {reviewGrade?.headline}
                 </h2>
                 <p className="text-xs text-zinc-400 mt-1">
-                  对标名作节奏骨架，核心悬念与开场危机推进明确
+                  {reviewGrade?.summary}
                 </p>
               </div>
 
-              <div className="w-20 h-20 rounded-full bg-zinc-950 border-2 border-amber-500 flex flex-col items-center justify-center shadow-lg shadow-amber-500/20">
+              <div className="w-20 h-20 shrink-0 rounded-full bg-zinc-950 border-2 border-amber-500 flex flex-col items-center justify-center shadow-lg shadow-amber-500/20">
                 <span className="text-2xl font-black text-amber-400 font-mono leading-none">
                   {reviewReport.score_overall}
                 </span>
-                <span className="text-[9px] text-zinc-500 mt-1 font-mono">/ 100 分</span>
+                <span className="text-[10px] text-zinc-500 mt-1 font-mono whitespace-nowrap">/ 100 分</span>
               </div>
             </div>
 
@@ -230,12 +259,14 @@ export const ReviewView: React.FC = () => {
                   <div key={item.key}>
                     <div className="flex justify-between text-[11px] mb-1">
                       <span className="text-zinc-300">{item.label}</span>
-                      <span className="font-mono text-amber-400 font-bold">{item.score} / 100</span>
+                      <span className={`font-mono font-bold ${item.score === null ? 'text-zinc-500' : 'text-amber-400'}`}>
+                        {formatRadarScore(item.score)}
+                      </span>
                     </div>
                     <div className="w-full h-2 bg-zinc-950 rounded-full overflow-hidden border border-zinc-800">
                       <div
                         className="h-full bg-gradient-to-r from-amber-600 to-amber-400 rounded-full transition-all duration-500"
-                        style={{ width: `${item.score}%` }}
+                        style={{ width: `${item.score ?? 0}%` }}
                       />
                     </div>
                   </div>
@@ -293,7 +324,7 @@ export const ReviewView: React.FC = () => {
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-zinc-500 text-xs space-y-2">
             <ShieldCheck className="w-10 h-10 opacity-30 text-amber-400" />
-            <p>选择章节并点击左侧「开始 AI 商业审稿」对当前写作稿件进行验收评估</p>
+            <p>本章尚未审稿，点击左侧「开始 AI 商业审稿」对当前写作稿件进行验收评估</p>
           </div>
         )}
       </main>

@@ -55,17 +55,19 @@ pub struct DbState {
 }
 
 impl DbState {
-    pub fn new(db_path: PathBuf) -> Self {
+    pub fn new(db_path: PathBuf) -> std::result::Result<Self, String> {
         if let Some(parent) = db_path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("创建数据目录失败 {}: {}", parent.display(), e))?;
         }
 
-        let conn = Connection::open(&db_path).expect("Failed to open SQLite database");
-        init_tables(&conn).expect("Failed to initialize database tables");
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("打开 SQLite 数据库失败 {}: {}", db_path.display(), e))?;
+        init_tables(&conn).map_err(|e| format!("初始化数据表失败: {}", e))?;
 
-        Self {
+        Ok(Self {
             conn: Mutex::new(conn),
-        }
+        })
     }
 }
 
@@ -134,29 +136,45 @@ pub fn insert_novel_with_chapters(
     total_chapters: usize,
     chapters: &[crate::parser::Chapter],
 ) -> Result<()> {
-    let mut stmt_novel = conn.prepare(
-        "INSERT OR REPLACE INTO novels (id, title, file_name, total_words, total_chapters) VALUES (?1, ?2, ?3, ?4, ?5)"
-    )?;
-    stmt_novel.execute(params![novel_id, title, file_name, total_words as i64, total_chapters as i64])?;
+    // 整体放在一个事务里：任一步失败时 tx 被 drop 自动回滚，不会在共享连接上残留未结束的事务
+    let tx = conn.unchecked_transaction()?;
 
-    // 事务写入章节
-    conn.execute("BEGIN TRANSACTION", [])?;
-    let mut stmt_ch = conn.prepare(
-        "INSERT OR REPLACE INTO chapters (id, novel_id, title, word_count, content, status) VALUES (?1, ?2, ?3, ?4, ?5, 'pending')"
+    tx.execute(
+        "INSERT OR REPLACE INTO novels (id, title, file_name, total_words, total_chapters) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![novel_id, title, file_name, total_words as i64, total_chapters as i64],
     )?;
 
-    for ch in chapters {
-        stmt_ch.execute(params![
-            ch.id as i64,
-            novel_id,
-            ch.title,
-            ch.word_count as i64,
-            ch.content
-        ])?;
+    // 重新导入同名小说时清掉上一次的章节与聚合资产，避免残留章节和重复计数
+    for table in ["chapters", "characters", "world_elements"] {
+        tx.execute(&format!("DELETE FROM {} WHERE novel_id = ?1", table), params![novel_id])?;
     }
 
-    conn.execute("COMMIT", [])?;
-    Ok(())
+    {
+        let mut stmt_ch = tx.prepare(
+            "INSERT OR REPLACE INTO chapters (id, novel_id, title, word_count, content, status) VALUES (?1, ?2, ?3, ?4, ?5, 'pending')"
+        )?;
+        for ch in chapters {
+            stmt_ch.execute(params![
+                ch.id as i64,
+                novel_id,
+                ch.title,
+                ch.word_count as i64,
+                ch.content
+            ])?;
+        }
+    }
+
+    tx.commit()
+}
+
+// 从书库删除小说：小说、章节与聚合资产一并删除（同一事务，失败自动回滚）
+pub fn delete_novel(conn: &Connection, novel_id: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for table in ["chapters", "characters", "world_elements"] {
+        tx.execute(&format!("DELETE FROM {} WHERE novel_id = ?1", table), params![novel_id])?;
+    }
+    tx.execute("DELETE FROM novels WHERE id = ?1", params![novel_id])?;
+    tx.commit()
 }
 
 // 获取小说列表
@@ -446,6 +464,94 @@ mod tests {
         assert_eq!(report.characters[0].name, "克莱恩");
         assert_eq!(report.world_elements.len(), 1);
         assert_eq!(report.world_elements[0].term, "非凡魔药");
+    }
+
+    fn chapter(id: usize, title: &str) -> crate::parser::Chapter {
+        crate::parser::Chapter {
+            id,
+            title: title.to_string(),
+            word_count: 10,
+            preview: String::new(),
+            content: format!("{}正文", title),
+        }
+    }
+
+    #[test]
+    fn test_failed_insert_rolls_back_and_later_saves_still_work() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_tables(&conn).unwrap();
+
+        conn.execute("ALTER TABLE chapters RENAME TO chapters_broken", []).unwrap();
+        let first = insert_novel_with_chapters(&conn, "n1", "书", "a.txt", 10, 1, &[chapter(1, "第一章")]);
+        assert!(first.is_err());
+        assert!(conn.is_autocommit(), "a failed save must not leave a transaction open");
+        assert_eq!(list_novels_count(&conn), 0, "novel row must roll back with its chapters");
+
+        conn.execute("ALTER TABLE chapters_broken RENAME TO chapters", []).unwrap();
+        insert_novel_with_chapters(&conn, "n1", "书", "a.txt", 10, 1, &[chapter(1, "第一章")]).unwrap();
+        assert_eq!(get_chapters(&conn, "n1").unwrap().len(), 1);
+    }
+
+    fn list_novels_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM novels", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn test_reimport_replaces_old_chapters_and_aggregated_assets() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_tables(&conn).unwrap();
+        insert_novel_with_chapters(&conn, "n1", "书", "a.txt", 20, 2, &[chapter(1, "第一章"), chapter(2, "第二章")]).unwrap();
+        let analysis = AnalysisPayload {
+            summary: "s".into(),
+            tension_score: 5,
+            narrative_hook: "h".into(),
+            technique_notes: "t".into(),
+            characters: vec![CharPayload { name: "甲".into(), role: "r".into(), key_action: "k".into(), inner_motivation: "m".into() }],
+            world_elements: vec![WorldPayload { term: "术".into(), category: "其他".into(), description: "d".into() }],
+        };
+        update_chapter_analysis_db(&conn, "n1", 2, &analysis).unwrap();
+
+        insert_novel_with_chapters(&conn, "n1", "书", "a.txt", 10, 1, &[chapter(1, "新第一章")]).unwrap();
+
+        let chapters = get_chapters(&conn, "n1").unwrap();
+        assert_eq!(chapters.len(), 1, "chapters from the previous import must not linger");
+        assert_eq!(chapters[0].title, "新第一章");
+        let report = get_novel_report(&conn, "n1").unwrap();
+        assert!(report.characters.is_empty());
+        assert!(report.world_elements.is_empty());
+    }
+
+    #[test]
+    fn test_delete_novel_removes_novel_chapters_and_assets() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_tables(&conn).unwrap();
+        insert_novel_with_chapters(&conn, "n1", "书", "a.txt", 10, 1, &[chapter(1, "第一章")]).unwrap();
+        insert_novel_with_chapters(&conn, "n2", "另一本", "b.txt", 10, 1, &[chapter(1, "第一章")]).unwrap();
+        let analysis = AnalysisPayload {
+            summary: "s".into(),
+            tension_score: 5,
+            narrative_hook: "h".into(),
+            technique_notes: "t".into(),
+            characters: vec![CharPayload { name: "甲".into(), role: "r".into(), key_action: "k".into(), inner_motivation: "m".into() }],
+            world_elements: vec![WorldPayload { term: "术".into(), category: "其他".into(), description: "d".into() }],
+        };
+        update_chapter_analysis_db(&conn, "n1", 1, &analysis).unwrap();
+
+        delete_novel(&conn, "n1").unwrap();
+
+        let ids: Vec<String> = list_novels(&conn).unwrap().into_iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec!["n2".to_string()], "only the other novel remains");
+        assert!(get_chapters(&conn, "n1").unwrap().is_empty());
+        let report = get_novel_report(&conn, "n1").unwrap();
+        assert!(report.characters.is_empty());
+        assert!(report.world_elements.is_empty());
+        assert_eq!(get_chapters(&conn, "n2").unwrap().len(), 1, "other novels are untouched");
+    }
+
+    #[test]
+    fn test_db_state_new_reports_error_instead_of_panicking() {
+        let result = DbState::new(PathBuf::from("/dev/null/not-a-dir/novel_craft.db"));
+        assert!(result.is_err());
     }
 }
 

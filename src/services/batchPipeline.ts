@@ -26,17 +26,20 @@ class BatchPipelineManager {
     });
 
     const queue = [...chaptersToAnalyze];
+    const signal = this.abortController.signal;
     let completedCount = 0;
+    let failedCount = 0;
+    let unsavedCount = 0;
 
-    // 工作线程函数
+    // 工作线程函数：只认本批次自己的 signal，stop() 后立即重开新批次时旧 worker 也会退出
     const worker = async () => {
-      while (queue.length > 0 && !this.abortController?.signal.aborted) {
+      while (queue.length > 0 && !signal.aborted) {
         // 处理暂停逻辑
-        while (this.isPaused && !this.abortController?.signal.aborted) {
+        while (this.isPaused && !signal.aborted) {
           await new Promise((res) => setTimeout(res, 500));
         }
 
-        if (this.abortController?.signal.aborted) break;
+        if (signal.aborted) break;
 
         const chapter = queue.shift();
         if (!chapter) break;
@@ -46,27 +49,40 @@ class BatchPipelineManager {
         });
 
         try {
-          // 调用大模型抽取
+          // 调用大模型抽取（stop() 会通过 signal 取消进行中的请求）
           const analysis = await analyzeChapterWithLLM(
             config,
             String(chapter.title),
-            chapter.content
+            chapter.content,
+            { signal }
           );
           analysis.chapter_id = chapter.id;
+          // 停止后才返回的结果一律丢弃：同名重新导入时旧书已被覆盖，写回会串到新正文上
+          if (signal.aborted) break;
 
-          // 1. 存入 SQLite / 本地持久化
-          await persistChapterAnalysis(novelFileName, chapter.id, analysis);
-
-          // 2. 更新内存 Store
+          // 1. 先更新内存 Store，落盘失败也不丢本次结果。
+          //    期间已切换到别的小说时只存回原书：章节 id 各书都从 0/1 开始，写进 Store 会串到当前展示的书上
           const currentStore = useNovelStore.getState();
-          currentStore.setChapterAnalysis(chapter.id, analysis);
-          currentStore.updateGlobalAggregations(analysis);
+          if (currentStore.novel?.file_name === novelFileName) {
+            currentStore.setChapterAnalysis(chapter.id, analysis);
+            currentStore.updateGlobalAggregations(analysis);
+          }
 
           completedCount++;
           currentStore.setBatchProgress({
             completed: completedCount,
           });
+
+          // 2. 存入 SQLite / 本地持久化
+          try {
+            await persistChapterAnalysis(novelFileName, chapter.id, analysis);
+          } catch (persistErr) {
+            unsavedCount++;
+            console.error(`章节 [${chapter.title}] 拆解结果保存失败:`, persistErr);
+          }
         } catch (err: any) {
+          if (signal.aborted) break;
+          failedCount++;
           console.error(`章节 [${chapter.title}] 拆解失败:`, err);
           // 失败继续处理后续章节
         }
@@ -80,10 +96,18 @@ class BatchPipelineManager {
     const workers = Array.from({ length: Math.min(concurrency, queue.length) }, () => worker());
     await Promise.all(workers);
 
+    if (signal.aborted) return; // stop() 已写入「拆解已终止」
+
+    const problems = [
+      failedCount > 0 ? `${failedCount} 章拆解失败（可点「断点续拆剩余」重试）` : '',
+      unsavedCount > 0 ? `${unsavedCount} 章结果未能保存到本地` : '',
+    ].filter(Boolean);
     useNovelStore.getState().setBatchProgress({
       isRunning: false,
       isPaused: false,
-      currentTitle: '全部拆解任务已结束',
+      currentTitle: problems.length > 0
+        ? `拆解结束：成功 ${completedCount} 章，${problems.join('，')}`
+        : '全部拆解任务已结束',
     });
   }
 

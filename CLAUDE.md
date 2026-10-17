@@ -14,11 +14,12 @@ The app is a local tool for web-novel writers with four tabs (`ActiveTab` in the
 npm run tauri dev        # desktop app (compiles Rust shell, 1280x820 window)
 npm run dev              # browser-only mode at http://localhost:1420 (strictPort; Tauri expects this port)
 npx vite build           # frontend bundle only -> dist/
+CI=true npm run tauri build   # release .app + .dmg; CI=true skips the Finder AppleScript step, which times out (-1712) without macOS Automation permission
 
 cd src-tauri && cargo test                                         # Rust tests (parser + storage)
 cd src-tauri && cargo test parser::tests::test_parse_novel_with_intro   # single Rust test
 
-node --test src/services/llm.test.ts                               # TS tests (node:test, Node ≥23 strips types)
+node --test "src/**/*.test.ts"                                     # all TS tests (node:test, Node ≥23 strips types)
 node --test --test-name-pattern="fallback" src/services/llm.test.ts     # single TS test
 ```
 
@@ -34,14 +35,15 @@ TS tests run on Node's built-in type stripping, not Vite, so any module a test i
 ### Two runtimes: Tauri vs. browser fallback
 The frontend has to work both inside Tauri and in a plain browser. `src/services/db.ts` is the only persistence layer. Each function checks `isTauri()` (`'__TAURI_INTERNALS__' in window`) and tries `invoke('db_*')`. If that fails, or when running outside Tauri, it falls back to `localStorage` (keys `novel_bookshelf_index`, `novel_meta_{novelId}`, `novel_analysis_{novelId}_{chapterId}`). Keep both paths working when you change persistence.
 
-- `novelId` is derived from the file name (`file_name.replace(/[^a-zA-Z0-9_一-龥]/g, '_')`), and each `db.ts` function repeats this. Re-importing a file with the same name overwrites the earlier one (`INSERT OR REPLACE`).
+- `novelId` is derived from the file name (`file_name.replace(/[^a-zA-Z0-9_一-龥]/g, '_')`), and each `db.ts` function repeats this. Re-importing a file with the same name overwrites the earlier book and clears its analyses: SQLite drops the old chapters, and `persistNovel` clears the localStorage chapter caches (`clearAnalysisCaches`). The UI asks for confirmation first (`importConfirmMessage` in `src/utils/novelSwitch.ts`).
 - Tauri `invoke` arguments are camelCase on the JS side (`novelId`, `fileName`) because Tauri converts top-level Rust params. Fields of nested serde structs such as `AnalysisPayload` stay snake_case.
-- Persistence is not symmetric. SQLite stores only `summary/tension_score/narrative_hook/technique_notes` per chapter plus aggregated characters/world elements. When analyses are reloaded from SQLite, `characters`/`world_elements` come back empty, and `paragraph_analyses` is never persisted. `deleteStoredNovel` clears only localStorage; there is no Tauri delete command.
+- Persistence is not symmetric. SQLite stores only `summary/tension_score/narrative_hook/technique_notes` per chapter plus aggregated characters/world elements. When analyses are reloaded from SQLite, per-chapter `characters`/`world_elements` come back empty; the novel-level lists are read back separately by `loadStoredGlobalAssets` (`db_get_novel_report`, mapped in `src/services/assetRecords.ts`) into the store's `setGlobalAssets`. `paragraph_analyses` is never persisted. `deleteStoredNovel` deletes the SQLite rows (`db_delete_novel`, one transaction) and also clears the localStorage meta, bookshelf entry and `novel_analysis_{novelId}_{n}` caches (exact match via `isAnalysisCacheKey`).
+- If the localStorage fallback itself fails (quota), `persistNovel`/`persistChapterAnalysis` throw a user-facing message. Callers keep the data in memory and show the message instead of treating it as a hard failure.
 
 ### Rust backend (`src-tauri/src/`)
 - `lib.rs` defines the commands. A new command needs `#[tauri::command]` plus an entry in `generate_handler![...]`.
 - `parser.rs` splits chapters with a regex (`第N章/卷/回…`, `序章`, `尾声`, `番外`). Text before the first match becomes chapter id `0` ("引子 / 前言"). If nothing matches, the whole text becomes one chapter.
-- `storage.rs` holds one `Mutex<Connection>` (rusqlite, bundled) at `{app_data_dir}/novel_craft.db`. Tables are `novels`, `chapters` (PK `(novel_id, id)`, `status` pending/analyzing/completed/failed), `characters` (UNIQUE `(novel_id, name)`, `appearance_count` incremented on upsert), and `world_elements`. The schema is plain `CREATE TABLE IF NOT EXISTS` in `init_tables` with no migrations, so a new column will not appear in existing user DBs unless you add an `ALTER` path.
+- `storage.rs` holds one `Mutex<Connection>` (rusqlite, bundled) at `{app_data_dir}/novel_craft.db`. `DbState::new` returns `Result`. If it fails, `lib.rs` does not `manage()` the state, every `db_*` command returns an error, and `db.ts` falls back to localStorage, so the app never panics at startup. `insert_novel_with_chapters` runs in one transaction (dropped = rolled back) and first deletes the novel id's old chapters, characters and world_elements, so re-importing a file starts fresh. Tables are `novels`, `chapters` (PK `(novel_id, id)`, `status` pending/analyzing/completed/failed), `characters` (UNIQUE `(novel_id, name)`, `appearance_count` incremented on upsert), and `world_elements`. The schema is plain `CREATE TABLE IF NOT EXISTS` in `init_tables` with no migrations, so a new column will not appear in existing user DBs unless you add an `ALTER` path.
 - Rust does not proxy LLM calls. `reqwest`/`tokio` are declared in `Cargo.toml` but unused.
 
 ### Chapter splitting is implemented twice
@@ -49,17 +51,30 @@ The UI reads the uploaded `File` in `DeconstructView.tsx` (`readFileAsTextSmart`
 
 ### LLM layer (`src/services/llm.ts`)
 - All model calls are frontend `fetch` requests to an OpenAI-compatible `/chat/completions` endpoint (bring your own model). `buildChatUrl` normalizes the base URL and adds `/v1/chat/completions` when needed. In browser mode the endpoint must allow CORS. Tauri sets `csp: null`.
-- Every feature function follows the same pattern: build a Chinese system prompt that demands strict JSON → `callLLM(config, system, user)` → `extractAndParseJson<T>(raw, fallback?)`. The parser strips `<think>…</think>` (DeepSeek-R1), takes the content of ```json fences, then falls back to the outermost `{}`/`[]`. Result shapes live in `src/types/index.ts`, and new LLM features should follow the same pattern.
+- HTTP goes through `fetchTextWithRetry` in `src/services/http.ts`. Defaults:
+  - a 120s timeout that covers reading the body;
+  - an optional caller `signal`;
+  - exponential-backoff retry on network errors and 408/429/5xx;
+  - no retry after a timeout or a cancel.
+
+  The connection test uses a 30s timeout and no retries.
+- `analyzeChapterWithLLM` sends the chapter as numbered paragraphs (`[n] …`) built by `src/utils/paragraphs.ts`. Over-long chapters keep the head (60%) and the tail (40%), because the chapter-ending hook matters. The UI must split paragraphs with the same `splitParagraphs`, and must map `paragraph_analyses` through `assignParagraphAnalyses`, never by raw `index`. Paragraphs without an analysis show nothing; there is no fallback to another paragraph's analysis.
+- Every feature function follows the same pattern: build a Chinese system prompt that demands strict JSON → `callLLM(config, system, user, { signal? })` → `extractAndParseJson<T>(raw, fallback?)`. The parser strips reasoning via `stripThinking` (`src/services/thinking.ts`: paired `<think>…</think>`, a dangling `</think>` whose opening tag a proxy dropped, and an unfinished `<think>`), takes the content of ```json fences, then falls back to the outermost `{}`/`[]`. Prose functions (`generateInspirationDraft` / `expandStoryDraft` / `polishStoryDraft`) also return `stripThinking(...)`, since their output is written straight into the chapter. Result shapes live in `src/types/index.ts`, and new LLM features should follow the same pattern. Parsed JSON then goes through a `normalize*` function in `src/services/normalize.ts`: if a required field (an overall score, a chapter summary or tension score) is missing it returns `null` and the caller throws a retry error; optional text stays empty (the UI shows「模型未给出」). Never invent scores or canned comments as fallbacks.
 - Config comes from the store (`apiBaseUrl/apiKey/modelName`) and is persisted in localStorage as `novel_api_base/novel_api_key/novel_model_name`. The defaults (`http://127.0.0.1:8045`, `gemini-3.8-flash-high`) assume a local OpenAI-compatible proxy.
 - `src/data/authorStyles.ts` (author style guidelines injected into prompts) and `src/data/promptArsenal.ts` (scene-technique prompt templates) are static prompt data. A test requires ≥5 author styles, each with a guideline longer than 50 chars.
 
 ### Batch analysis (`src/services/batchPipeline.ts`)
-`batchPipeline` is a singleton. It starts `batchConcurrency` workers (default 2) that pull from a shared queue and sleep 300ms between calls. Pause polls a flag. Stop aborts an `AbortController` whose signal is never passed to `fetch`, so requests already in flight still finish. A failed chapter is logged and skipped. Each result goes to `persistChapterAnalysis` → `setChapterAnalysis` → `updateGlobalAggregations`. Progress is in `store.batchProgress`.
+`batchPipeline` is a singleton. It starts `batchConcurrency` workers (default 2) that pull from a shared queue and sleep 300ms between calls. Pause polls a flag. Each batch captures its own `AbortController.signal`, so `stop()` cancels the requests already in flight, and workers from a stopped batch exit even if a new batch has started. Each result goes to the store first (`setChapterAnalysis` → `updateGlobalAggregations`, skipped if the user has since switched to another novel, because chapter ids collide across novels) and then to `persistChapterAnalysis` under the batch's own `novelFileName`. Switching novels while a batch runs asks for confirmation and stops it (`mustStopBatchBeforeSwitch`; reopening the same novel does not). Importing a file or loading the sample always stops it (`mustStopBatchBeforeImport`), and results that arrive after `stop()` are dropped. Single-chapter and single-paragraph analysis capture the novel and chapter text at request time; `chapterResultTarget` drops a late result if a same-name re-import changed that chapter. Failed and unsaved chapters are counted and reported in the final `batchProgress.currentTitle`.
 
 ### State (`src/stores/novelStore.ts`)
-There is a single Zustand store and no `persist` middleware. The writer's own book (`volumes` → chapters, `myCharacters`, `myWorldElements`, `ideas`, `prompts`) lives only in memory, is seeded with demo content, and is lost on reload. Export goes through `ExportProjectModal` (Blob download).
+There is a single Zustand store. It is wrapped in `persist`, which saves the writer's project to localStorage under the key `novel_craft_project`. That covers `volumes`, `activeChapterId`, `myCharacters`, `myWorldElements`, `ideas`, preferences and user-added prompts. The rules live in `src/stores/persistence.ts`:
+- `partialize` and `merge` decide what is saved and how it is restored. Built-in prompts always come from code.
+- `createSafeStorage` swallows write errors so typing never throws. Write failures and recoveries are reported to `src/stores/persistStatus.ts`, a separate store so that an update cannot re-trigger a persist write. `App.tsx` shows a banner from it.
+
+The source novel and its analyses are not saved here; they go through `db.ts`. First run seeds demo content. Export goes through `ExportProjectModal` (Blob download).
 - `globalCharacters/globalWorldElements` are aggregated from the analyzed source novel and serve as reference. `myCharacters/myWorldElements` belong to the writer's new book. Keep the two sets separate.
-- `draftTitle/draftContent` mirror the active chapter, and their setters write through to `volumes` via `updateChapterTitle/updateChapterContent`. `StoryChapter.reference_chapter_id` links a draft chapter to a source-novel chapter id.
+- `draftTitle/draftContent` mirror the active chapter and are not persisted. `merge` and `deleteChapter` re-derive them with `resolveActiveDraft`/`removeChapter` (`src/stores/chapterOps.ts`). When there is an active chapter, `setDraftTitle/setDraftContent` call only `updateChapterTitle/updateChapterContent` (one `set` per keystroke). `StoryChapter.reference_chapter_id` links a draft chapter to a source-novel chapter id.
+- `createVolume` returns the new volume id. "采用此大纲立即仿写" in BrainwaveView creates a new volume and chapter and selects the idea; `EditorView` feeds the selected idea into its AI prompts.
 
 ### UI
-`App.tsx` switches views by `activeTab`. Each view is a large single component under `src/components/{deconstruct,brainwave,editor,review}/` (`EditorView.tsx` is ~1250 lines, `DeconstructView.tsx` ~1070). Styling is Tailwind v4 through `@tailwindcss/vite` (no `tailwind.config`, `App.css` is just the import) on a dark `zinc` palette, with `lucide-react` icons. There is some narrow/mobile handling (`mobileView` in `DeconstructView`, viewport meta in `index.html`).
+`App.tsx` switches views by `activeTab` inside an `ErrorBoundary` keyed by the tab, so a render crash replaces only that view and switching tabs resets it. Each view is a large single component under `src/components/{deconstruct,brainwave,editor,review}/` (`EditorView.tsx` is ~1250 lines, `DeconstructView.tsx` ~1070). Styling is Tailwind v4 through `@tailwindcss/vite` (no `tailwind.config`, `App.css` is just the import) on a dark `zinc` palette, with `lucide-react` icons. There is some narrow/mobile handling (`mobileView` in `DeconstructView`, viewport meta in `index.html`).

@@ -1,19 +1,30 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useNovelStore } from '../../stores/novelStore';
+import { findSelectedIdea, validateBrainwaveInput } from '../../stores/ideaOps';
+import { EditorNotice, UNDO_NOTICE_MS, type EditorNoticeState } from '../editor/EditorNotice';
 import { generateBrainwaveWithLLM } from '../../services/llm';
-import { Sparkles, ArrowRight, Wand2, Compass, Target, List, FileText } from 'lucide-react';
+import { NO_API_KEY_MESSAGE, formatActionError } from '../../services/llmErrors';
+import { Sparkles, ArrowRight, Wand2, Compass, Target, List, FileText, Trash2 } from 'lucide-react';
+import type { BrainwaveIdea } from '../../types';
+
+function buildIdeaOutline(idea: BrainwaveIdea): string {
+  const { act1, act2, act3 } = idea.three_act_beats;
+  return `【金手指】${idea.golden_finger}\n【核心冲突】${idea.main_conflict}\n【起】${act1}\n【承】${act2}\n【转合】${act3}`;
+}
 
 export const BrainwaveView: React.FC = () => {
   const { 
     ideas, 
     addIdea, 
+    deleteIdea,
     selectedIdeaId, 
     setSelectedIdeaId,
     apiBaseUrl, 
     apiKey, 
     modelName,
     setActiveTab,
-    setDraftTitle
+    createVolume,
+    createChapter
   } = useNovelStore();
 
   const [genreInput, setGenreInput] = useState('赛博朋克 + 东方修真克苏鲁');
@@ -22,14 +33,22 @@ export const BrainwaveView: React.FC = () => {
   );
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [notice, setNotice] = useState<EditorNoticeState | null>(null);
+  const dismissNotice = useCallback(() => setNotice(null), []);
   // 🌟 手机端视图分段切换: 'generator' (创意生成与列表) | 'detail' (灵感卡片详述) 🌟
   const [mobileTab, setMobileTab] = useState<'generator' | 'detail'>('generator');
 
-  const currentIdea = ideas.find(i => i.id === selectedIdeaId) || ideas[0];
+  // 与创作台同一规则：只展示明确选中的脑洞，不拿第一条顶替（否则看似选中，创作台却没有参考它）
+  const currentIdea = findSelectedIdea(ideas, selectedIdeaId);
 
   const handleGenerate = async () => {
+    const inputError = validateBrainwaveInput(genreInput, skeletonInput);
+    if (inputError) {
+      setErrorMsg(inputError);
+      return;
+    }
     if (!apiKey) {
-      alert('请先在右上角【模型配置】中配置您的 API Key');
+      setErrorMsg(NO_API_KEY_MESSAGE);
       return;
     }
 
@@ -47,20 +66,43 @@ export const BrainwaveView: React.FC = () => {
         setMobileTab('detail');
       }
     } catch (err: any) {
-      setErrorMsg(err.message || '生成失败');
+      setErrorMsg(formatActionError('脑洞推演', err.message));
     } finally {
       setIsGenerating(false);
     }
   };
 
+  // 新建一卷承载这份大纲，不覆盖已有章节；选中该脑洞后，创作台的 AI 生成会带上它的设定
   const handleUseIdeaForWriting = (idea: typeof currentIdea) => {
     if (!idea) return;
-    setDraftTitle(`《${idea.title}》第一章：死局重生`);
+    const volumeId = createVolume(`《${idea.title}》第一卷`, buildIdeaOutline(idea));
+    createChapter(volumeId, '第一章');
+    setSelectedIdeaId(idea.id);
     setActiveTab('write');
   };
 
+  // 与章节 / 分卷一致：删除不弹确认，改为可撤销
+  const handleDeleteIdea = (idea: BrainwaveIdea) => {
+    const index = ideas.findIndex((i) => i.id === idea.id);
+    if (index < 0) return;
+    const wasSelected = selectedIdeaId === idea.id;
+    deleteIdea(idea.id);
+    setNotice({
+      tone: 'info',
+      text: `已删除脑洞「${idea.title}」`,
+      durationMs: UNDO_NOTICE_MS,
+      action: {
+        label: '撤销',
+        onClick: () => {
+          useNovelStore.getState().restoreIdea(index, idea, wasSelected);
+          setNotice(null);
+        },
+      },
+    });
+  };
+
   return (
-    <div className="flex-1 flex flex-col md:flex-row overflow-hidden bg-zinc-950 text-zinc-100 pb-14 md:pb-0">
+    <div className="flex-1 flex flex-col md:flex-row overflow-hidden bg-zinc-950 text-zinc-100 pb-mobile-nav md:pb-0">
       {/* 🌟 手机端顶部视图分段切换器 🌟 */}
       <div className="md:hidden flex items-center justify-around bg-zinc-900 border-b border-zinc-800 p-1.5 shrink-0 z-20">
         <button
@@ -129,30 +171,54 @@ export const BrainwaveView: React.FC = () => {
             <Wand2 className="w-3.5 h-3.5" />
             <span>{isGenerating ? 'AI 正在推演融合中...' : '推演全新脑洞'}</span>
           </button>
+
+          {/* 错误紧跟在触发按钮下方：手机端详情面板默认隐藏，放在那里用户看不到 */}
+          {errorMsg && (
+            <div role="alert" className="p-3 rounded bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
+              {errorMsg}
+            </div>
+          )}
         </div>
 
-        {/* 创意列表 */}
+        <EditorNotice notice={notice} onDismiss={dismissNotice} />
+
+        {/* 创意列表：选中按钮与删除按钮并列，避免按钮嵌套 */}
         <div className="flex-1 overflow-y-auto divide-y divide-zinc-800/40">
           {ideas.map((idea) => {
             const isSelected = idea.id === currentIdea?.id;
             return (
-              <button
+              <div
                 key={idea.id}
-                onClick={() => {
-                  setSelectedIdeaId(idea.id);
-                  if (window.innerWidth < 768) {
-                    setMobileTab('detail');
-                  }
-                }}
-                className={`w-full text-left p-3 text-xs transition-colors flex flex-col gap-1 ${
-                  isSelected ? 'bg-amber-500/10 text-amber-300 border-l-2 border-amber-500' : 'hover:bg-zinc-800/40 text-zinc-300'
+                className={`flex items-stretch transition-colors ${
+                  isSelected ? 'bg-amber-500/10 border-l-2 border-amber-500' : 'hover:bg-zinc-800/40'
                 }`}
               >
-                <span className="font-semibold text-zinc-100 truncate">{idea.title}</span>
-                <span className="text-[10px] text-zinc-500">{idea.genre}</span>
-              </button>
+                <button
+                  onClick={() => {
+                    setSelectedIdeaId(idea.id);
+                    if (window.innerWidth < 768) {
+                      setMobileTab('detail');
+                    }
+                  }}
+                  className={`flex-1 min-w-0 text-left p-3 text-xs flex flex-col gap-1 ${isSelected ? 'text-amber-300' : 'text-zinc-300'}`}
+                >
+                  <span className="font-semibold text-zinc-100 truncate">{idea.title}</span>
+                  <span className="text-[10px] text-zinc-500">{idea.genre}</span>
+                </button>
+                <button
+                  onClick={() => handleDeleteIdea(idea)}
+                  className="px-3 text-zinc-600 hover:text-rose-400 shrink-0"
+                  title="删除脑洞"
+                  aria-label={`删除脑洞「${idea.title}」`}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
             );
           })}
+          {ideas.length === 0 && (
+            <p className="p-4 text-center text-[11px] text-zinc-500">还没有脑洞，填写上方题材与骨架后点击「推演全新脑洞」</p>
+          )}
         </div>
       </aside>
 
@@ -160,25 +226,20 @@ export const BrainwaveView: React.FC = () => {
       <main className={`flex-1 overflow-y-auto p-4 md:p-6 bg-zinc-950 ${
         mobileTab === 'detail' ? 'block' : 'hidden md:block'
       }`}>
-        {errorMsg && (
-          <div className="mb-4 p-3 rounded bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
-            {errorMsg}
-          </div>
-        )}
-
         {currentIdea ? (
           <div className="max-w-3xl mx-auto space-y-6">
-            {/* 顶栏标题与一键开写 */}
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
+            {/* 顶栏标题与一键开写：手机端上下排列，按钮整行，避免标题与按钮文字同时折行 */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800 pb-4">
               <div>
                 <span className="text-[11px] font-mono text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded">
                   {currentIdea.genre}
                 </span>
                 <h2 className="text-xl font-bold text-zinc-100 mt-2">{currentIdea.title}</h2>
+                <p className="text-[11px] text-zinc-500 mt-1">创作台的示范初稿与资产映射正在参考这条脑洞</p>
               </div>
               <button
                 onClick={() => handleUseIdeaForWriting(currentIdea)}
-                className="flex items-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-zinc-950 font-semibold rounded-lg text-xs shadow-lg shadow-amber-500/15"
+                className="flex items-center justify-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-zinc-950 font-semibold rounded-lg text-xs shadow-lg shadow-amber-500/15 whitespace-nowrap shrink-0"
               >
                 <span>采用此大纲立即仿写</span>
                 <ArrowRight className="w-4 h-4" />
@@ -231,8 +292,10 @@ export const BrainwaveView: React.FC = () => {
             </div>
           </div>
         ) : (
-          <div className="h-full flex items-center justify-center text-zinc-500 text-xs">
-            请从左侧选择创意或点击生成全新脑洞
+          <div className="h-full flex items-center justify-center text-center text-zinc-500 text-xs px-4">
+            {ideas.length > 0
+              ? '尚未选用脑洞：从左侧点选一条，创作台的示范初稿与资产映射就会参考它'
+              : '请从左侧选择创意或点击生成全新脑洞'}
           </div>
         )}
       </main>

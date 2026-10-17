@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNovelStore } from '../../stores/novelStore';
+import { findChapter, locateChapter, resolveReferenceChapterId, chapterTitleOrDefault, type ChapterWriteMode } from '../../stores/chapterOps';
+import { appendUniqueBy, validateUniqueName, insertAt, DEFAULT_NAME_MAX_LENGTH } from '../../utils/collections';
 import { 
   generateInspirationDraft, 
   expandStoryDraft, 
@@ -13,6 +15,15 @@ import {
 } from '../../services/llm';
 import { CharacterItem, WorldElement, DraftParagraphCritique } from '../../types';
 import { ExportProjectModal } from './ExportProjectModal';
+import { ConsistencyReportBanner } from './ConsistencyReportBanner';
+import { VolumeFormModal } from './VolumeFormModal';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { useScrollHint } from '../../hooks/useScrollHint';
+import { diagnosisFailureNotice } from '../../utils/diagnosisNotice';
+import { boundTo, type ChapterBound } from '../../utils/chapterBound';
+import { findSelectedIdea } from '../../stores/ideaOps';
+import { EditorNotice, UNDO_NOTICE_MS, type EditorNoticeState, type EditorNoticeTone } from './EditorNotice';
+import { NO_API_KEY_MESSAGE, formatActionError } from '../../services/llmErrors';
 import { 
   Send, 
   BookOpen,
@@ -40,8 +51,18 @@ import {
   MessageSquareCode,
   Check,
   Feather,
-  Menu
+  Menu,
+  Undo2
 } from 'lucide-react';
+
+
+// 会改写正文的 AI 操作（同一时间只允许一个）
+type AiWriteKind = 'generate' | 'expand' | 'polish' | 'prompt';
+interface AiWriteTask {
+  kind: AiWriteKind;
+  label: string;
+  chapterId: string;
+}
 
 export const EditorView: React.FC = () => {
   const { 
@@ -51,6 +72,8 @@ export const EditorView: React.FC = () => {
     setDraftContent, 
     analyses,
     selectedChapterId,
+    novel,
+    setChapterReference,
     setActiveTab,
     ideas,
     selectedIdeaId,
@@ -70,6 +93,8 @@ export const EditorView: React.FC = () => {
     activeChapterId,
     setActiveChapterId,
     createVolume,
+    updateVolume,
+    deleteVolume,
     createChapter,
     updateChapterStatus,
     deleteChapter,
@@ -79,7 +104,11 @@ export const EditorView: React.FC = () => {
     setSelectedAuthorStyleId,
     apiBaseUrl,
     apiKey,
-    modelName
+    modelName,
+    applyAiTextToChapter,
+    lastAiEdit,
+    undoLastAiEdit,
+    dismissLastAiEdit
   } = useNovelStore();
 
   // 左侧面板大模式：'projectTree' (分卷目录树) | 'myAssets' (新书人物与世界观) | 'prompts' (场景化Prompt武器库) | 'reference' (原著对照)
@@ -91,6 +120,9 @@ export const EditorView: React.FC = () => {
 
   // 🌟 沉浸式专注模式 (Zen Mode) 🌟
   const [isZenMode, setIsZenMode] = useState(false);
+  // 手机抽屉按对话框处理：点遮罩或按 Esc 关闭，焦点锁在抽屉内，关闭后回到菜单按钮
+  const closeMobileDrawer = useCallback(() => setShowMobileDrawer(false), []);
+  const mobileDrawerRef = useFocusTrap<HTMLDivElement>(showMobileDrawer && !isZenMode, closeMobileDrawer);
 
   // 🌟 全书导出模态框 🌟
   const [showExportModal, setShowExportModal] = useState(false);
@@ -98,20 +130,43 @@ export const EditorView: React.FC = () => {
 
   // 🌟 核心新功能：专业主编逐段旁批状态 🌟
   const [showCritiqueDrawer, setShowCritiqueDrawer] = useState(false);
-  const [critiqueList, setCritiqueList] = useState<DraftParagraphCritique[]>([]);
+  const [critiqueResult, setCritiqueResult] = useState<ChapterBound<DraftParagraphCritique[]> | null>(null);
   const [isCritiquing, setIsCritiquing] = useState(false);
 
-  // AI 操作加载状态
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [isExpanding, setIsExpanding] = useState(false);
-  const [isPolishing, setIsPolishing] = useState(false);
+  // AI 操作加载状态：改写正文的操作共用一个任务槽（ref 防止同一帧内重复触发）
+  const [aiWrite, setAiWrite] = useState<AiWriteTask | null>(null);
+  const aiWriteRef = useRef<AiWriteTask | null>(null);
+  const isGenerating = aiWrite?.kind === 'generate';
+  const isExpanding = aiWrite?.kind === 'expand' || aiWrite?.kind === 'prompt';
+  const isPolishing = aiWrite?.kind === 'polish';
+  const isWritingCurrentChapter = !!aiWrite && aiWrite.chapterId === activeChapterId;
+  // 改写正文的按钮在任一 AI 写作进行中时都禁用，并说明原因
+  const aiWriteBusyTitle = aiWrite ? `AI 正在「${aiWrite.label}」，完成后可用` : undefined;
+  // 新的 AI 写作进行中时不提供撤销上一次结果，避免与进行中的写入交错
+  const canUndoAiEdit =
+    !!lastAiEdit &&
+    !isWritingCurrentChapter &&
+    lastAiEdit.chapterId === activeChapterId &&
+    lastAiEdit.appliedContent === draftContent;
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [isCheckingConsistency, setIsCheckingConsistency] = useState(false);
   const [isMapping, setIsMapping] = useState(false);
 
   // 诊断与冲突报告状态
-  const [diagnosis, setDiagnosis] = useState<RealtimeDiagnosis | null>(null);
-  const [consistencyReport, setConsistencyReport] = useState<ConsistencyCheckReport | null>(null);
+  const [diagnosisResult, setDiagnosisResult] = useState<ChapterBound<RealtimeDiagnosis> | null>(null);
+  const [notice, setNotice] = useState<EditorNoticeState | null>(null);
+  const toolbarScroll = useScrollHint<HTMLDivElement>();
+  const showNotice = (
+    tone: EditorNoticeTone,
+    text: string,
+    extra?: Pick<EditorNoticeState, 'action' | 'durationMs'>
+  ) => setNotice({ tone, text, ...extra });
+  const dismissNotice = useCallback(() => setNotice(null), []);
+  const [consistencyResult, setConsistencyResult] = useState<ChapterBound<ConsistencyCheckReport> | null>(null);
+  // 诊断 / 防吃设定 / 主编旁批只显示当前章节自己的结果
+  const diagnosis = boundTo(diagnosisResult, activeChapterId);
+  const consistencyReport = boundTo(consistencyResult, activeChapterId);
+  const critiqueList = boundTo(critiqueResult, activeChapterId) ?? [];
 
   // 编辑角色的局部表单状态
   const [editingCharIdx, setEditingCharIdx] = useState<number | null>(null);
@@ -123,6 +178,7 @@ export const EditorView: React.FC = () => {
     inner_motivation: ''
   });
   const [showAddChar, setShowAddChar] = useState(false);
+  const [charError, setCharError] = useState('');
 
   // 编辑世界观词条状态
   const [editingWorldIdx, setEditingWorldIdx] = useState<number | null>(null);
@@ -132,14 +188,24 @@ export const EditorView: React.FC = () => {
     description: ''
   });
   const [showAddWorld, setShowAddWorld] = useState(false);
+  const [worldError, setWorldError] = useState('');
 
-  // 新建分卷弹窗状态
-  const [showNewVolumeModal, setShowNewVolumeModal] = useState(false);
-  const [newVolumeTitle, setNewVolumeTitle] = useState('');
-  const [newVolumeDesc, setNewVolumeDesc] = useState('');
+  // 分卷弹窗：volumeId 为 null 是新建，否则编辑该卷
+  const [volumeForm, setVolumeForm] = useState<{ volumeId: string | null } | null>(null);
+  const editingVolumeIndex = volumeForm?.volumeId ? volumes.findIndex((v) => v.id === volumeForm.volumeId) : -1;
+  const editingVolume = editingVolumeIndex >= 0 ? volumes[editingVolumeIndex] : undefined;
 
-  const currentAnalysis = selectedChapterId ? analyses[selectedChapterId] : null;
-  const currentIdea = ideas.find(i => i.id === selectedIdeaId);
+  // 原著参考跟随写作章节自己的绑定，没有绑定才跟随拆解页的选中章节（见 resolveReferenceChapterId）
+  const activeChapter = findChapter(volumes, activeChapterId);
+  const referenceChapterId = resolveReferenceChapterId(
+    activeChapter?.reference_chapter_id,
+    selectedChapterId,
+    novel?.chapters.map((c) => c.id) ?? []
+  );
+  const referenceChapter = novel?.chapters.find((c) => c.id === referenceChapterId);
+  const followedChapter = novel?.chapters.find((c) => c.id === selectedChapterId);
+  const currentAnalysis = referenceChapterId !== null ? analyses[referenceChapterId] ?? null : null;
+  const currentIdea = findSelectedIdea(ideas, selectedIdeaId);
   const currentAuthorStyle = authorStyles.find(a => a.id === selectedAuthorStyleId) || authorStyles[0];
 
   const wordCount = draftContent.replace(/\s+/g, '').length;
@@ -165,86 +231,123 @@ export const EditorView: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [draftContent, selectedAuthorStyleId]);
+  }, [draftContent, selectedAuthorStyleId, activeChapterId]);
+
+  // 改写正文的统一入口：结果写回「发起请求时」的章节（期间该章只读），空结果不写入，写入后可撤销一步
+  const runAiWrite = async (
+    kind: AiWriteKind,
+    label: string,
+    mode: ChapterWriteMode,
+    request: () => Promise<string>
+  ): Promise<string | null> => {
+    if (aiWriteRef.current) return null;
+    if (!activeChapterId) {
+      showNotice('info', '请先在左侧目录新建或选择一个章节');
+      return null;
+    }
+    const task: AiWriteTask = { kind, label, chapterId: activeChapterId };
+    aiWriteRef.current = task;
+    setAiWrite(task);
+    try {
+      const text = await request();
+      if (!text.trim()) {
+        showNotice('error', formatActionError(label, '模型返回了空内容，本章未作修改'));
+        return null;
+      }
+      if (!applyAiTextToChapter(task.chapterId, text, mode, label)) {
+        showNotice('info', `${label}已完成，但原章节已被删除，结果未写入`);
+        return null;
+      }
+      const latest = useNovelStore.getState();
+      if (latest.activeChapterId !== task.chapterId) {
+        const target = latest.volumes.flatMap((v) => v.chapters).find((c) => c.id === task.chapterId);
+        showNotice('success', `「${label}」已完成，结果已写入发起时的章节《${chapterTitleOrDefault(target?.title ?? '')}》`);
+      }
+      return text;
+    } catch (err: any) {
+      showNotice('error', formatActionError(label, err.message));
+      return null;
+    } finally {
+      aiWriteRef.current = null;
+      setAiWrite(null);
+    }
+  };
 
   // 1. AI 启发式生成初稿范本 (注入名家文风)
   const handleGenerateInspiration = async () => {
     if (!apiKey) {
-      alert('请先在右上角【配置模型 API】配置密钥');
+      showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
-    setIsGenerating(true);
-    try {
-      const ideaCtx = currentIdea ? `书名《${currentIdea.title}》，题材：${currentIdea.genre}，金手指机制：${currentIdea.golden_finger}` : '';
-      const text = await generateInspirationDraft(
+    if (
+      draftContent.trim() &&
+      !confirm(`「示范初稿」会用新生成的稿子替换本章现有的 ${wordCount} 字（完成后可撤销）。继续吗？`)
+    ) {
+      return;
+    }
+    const ideaCtx = currentIdea ? `书名《${currentIdea.title}》，题材：${currentIdea.genre}，金手指机制：${currentIdea.golden_finger}` : '';
+    const chapterId = activeChapterId;
+    const text = await runAiWrite('generate', '示范初稿', 'replace', () =>
+      generateInspirationDraft(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftTitle || '第一章：死局求生',
         referenceBeatText,
         ideaCtx,
         currentAuthorStyle
-      );
-      setDraftContent(text);
-      handleRunDiagnosis(text);
-    } catch (err: any) {
-      alert('生成初稿失败: ' + err.message);
-    } finally {
-      setIsGenerating(false);
-    }
+      )
+    );
+    if (text) handleRunDiagnosis(text, chapterId);
   };
 
   // 2. AI 智能续写 (注入名家文风)
   const handleExpand = async () => {
     if (!draftContent.trim()) {
-      alert('请先输入一段正文，或点击「AI 示范初稿」！');
+      showNotice('info', '请先输入一段正文，或点击「示范初稿」生成开头');
       return;
     }
     if (!apiKey) {
-      alert('请先配置模型 API');
+      showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
-    setIsExpanding(true);
-    try {
-      const more = await expandStoryDraft(
+    await runAiWrite('expand', '续写', 'append', () =>
+      expandStoryDraft(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftContent,
         `顺着当前局势推进剧情，完全按照【${currentAuthorStyle.name}】的笔触行文`,
         currentAuthorStyle
-      );
-      setDraftContent(draftContent + '\n\n' + more);
-    } catch (err: any) {
-      alert('续写失败: ' + err.message);
-    } finally {
-      setIsExpanding(false);
-    }
+      )
+    );
   };
 
   // 3. AI 深度润色 (注入名家文风)
   const handlePolish = async () => {
     if (!draftContent.trim()) return;
     if (!apiKey) {
-      alert('请先配置模型 API');
+      showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
-    setIsPolishing(true);
-    try {
-      const polished = await polishStoryDraft(
+    await runAiWrite('polish', '润色', 'replace', () =>
+      polishStoryDraft(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftContent,
         `模仿${currentAuthorStyle.name}风格`,
         currentAuthorStyle
-      );
-      setDraftContent(polished);
-    } catch (err: any) {
-      alert('润色失败: ' + err.message);
-    } finally {
-      setIsPolishing(false);
-    }
+      )
+    );
   };
 
   // 4. 实时节奏诊断
-  const handleRunDiagnosis = async (contentToCheck?: string) => {
+  const handleRunDiagnosis = async (contentToCheck?: string, chapterId: string = activeChapterId) => {
     const text = contentToCheck || draftContent;
-    if (!text.trim() || !apiKey) return;
+    const triggeredManually = contentToCheck === undefined;
+    if (!apiKey) {
+      if (triggeredManually) showNotice('error', NO_API_KEY_MESSAGE);
+      return;
+    }
+    if (!text.trim()) {
+      if (triggeredManually) showNotice('info', '请先输入正文');
+      return;
+    }
     setIsDiagnosing(true);
     try {
       const res = await diagnoseDraftRealtime(
@@ -252,9 +355,12 @@ export const EditorView: React.FC = () => {
         text,
         referenceBeatText
       );
-      setDiagnosis(res);
-    } catch {
-      // 忽略
+      setDiagnosisResult({ chapterId, data: res });
+    } catch (err: any) {
+      // 不再用假分数兜底：失败时清掉旧诊断；自动触发的只给弱提示（见 diagnosisFailureNotice）
+      setDiagnosisResult(null);
+      const failure = diagnosisFailureNotice(triggeredManually, err.message);
+      showNotice(failure.tone, failure.text);
     } finally {
       setIsDiagnosing(false);
     }
@@ -263,14 +369,16 @@ export const EditorView: React.FC = () => {
   // 5. 核心：主编逐段旁批与精修建议 (结合名家文风审查)
   const handleRunParagraphCritique = async () => {
     if (!draftContent.trim()) {
-      alert('请先输入正文！');
+      showNotice('info', '请先输入正文');
       return;
     }
     if (!apiKey) {
-      alert('请先配置模型 API');
+      showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
+    const chapterId = activeChapterId;
     setIsCritiquing(true);
+    setCritiqueResult(null);
     setShowCritiqueDrawer(true);
     try {
       const results = await critiqueDraftParagraphsWithLLM(
@@ -279,17 +387,24 @@ export const EditorView: React.FC = () => {
         referenceBeatText,
         currentAuthorStyle
       );
-      setCritiqueList(results);
+      setCritiqueResult({ chapterId, data: results });
     } catch (err: any) {
-      alert('主编逐段旁批失败: ' + err.message);
+      setShowCritiqueDrawer(false);
+      showNotice('error', formatActionError('主编旁批', err.message));
     } finally {
       setIsCritiquing(false);
     }
   };
 
   // 一键采纳改写示范
+  const blockWhileWritingCurrentChapter = () => {
+    if (!isWritingCurrentChapter) return false;
+    showNotice('info', `AI 正在「${aiWrite?.label}」写入本章，完成后再修改正文`);
+    return true;
+  };
+
   const handleAdoptRewrite = (originalSnippet: string, suggestion: string) => {
-    if (!suggestion) return;
+    if (!suggestion || blockWhileWritingCurrentChapter()) return;
     const paras = draftContent.split(/\n+/);
     const targetIdx = paras.findIndex(p => p.includes(originalSnippet.slice(0, 15)));
     if (targetIdx >= 0) {
@@ -305,15 +420,16 @@ export const EditorView: React.FC = () => {
   // 6. AI 人设与世界观一致性冲突排查 (防吃设定)
   const handleCheckConsistency = async () => {
     if (!draftContent.trim()) {
-      alert('请先输入正文！');
+      showNotice('info', '请先输入正文');
       return;
     }
     if (!apiKey) {
-      alert('请先配置模型 API');
+      showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
+    const chapterId = activeChapterId;
     setIsCheckingConsistency(true);
-    setConsistencyReport(null);
+    setConsistencyResult(null);
     try {
       const report = await checkDraftConsistency(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
@@ -321,9 +437,9 @@ export const EditorView: React.FC = () => {
         myCharacters.map(c => ({ name: c.name, role: c.role, inner_motivation: c.inner_motivation, key_action: c.key_action })),
         myWorldElements.map(w => ({ term: w.term, category: w.category, description: w.description }))
       );
-      setConsistencyReport(report);
+      setConsistencyResult({ chapterId, data: report });
     } catch (err: any) {
-      alert('一致性排查失败: ' + err.message);
+      showNotice('error', formatActionError('一致性排查', err.message));
     } finally {
       setIsCheckingConsistency(false);
     }
@@ -332,11 +448,11 @@ export const EditorView: React.FC = () => {
   // 7. AI 一键映射转译原著资产
   const handleAutoMapAssets = async () => {
     if (!apiKey) {
-      alert('请先配置模型 API');
+      showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
     if (globalCharacters.length === 0 && globalWorldElements.length === 0) {
-      alert('原著尚未拆解出角色或世界观，请先在「1. 研习拆解坊」拆解几章原著！');
+      showNotice('info', '原著尚未拆解出角色或世界观，请先在「研习拆解坊」拆解几章原著');
       return;
     }
 
@@ -367,12 +483,21 @@ export const EditorView: React.FC = () => {
         description: `${mw.description} [对标原著: ${mw.original_counterpart}]`,
       }));
 
-      setMyCharacters(mappedChars);
-      setMyWorldElements(mappedWorld);
+      // 追加而不是覆盖用户已有的人设 / 设定；同名条目跳过。取最新状态，避免覆盖请求期间的手动修改
+      const latest = useNovelStore.getState();
+      const chars = appendUniqueBy(latest.myCharacters, mappedChars, (c) => c.name);
+      const world = appendUniqueBy(latest.myWorldElements, mappedWorld, (w) => w.term);
+      setMyCharacters(chars.items);
+      setMyWorldElements(world.items);
       setLeftNav('myAssets');
-      alert(`🎉 成功映射生成了 ${mappedChars.length} 个新书人设和 ${mappedWorld.length} 条新世界观设定！`);
+      const skipped = chars.skipped + world.skipped;
+      showNotice(
+        'success',
+        `映射完成：新增 ${chars.added} 个人设、${world.added} 条世界观设定` +
+          (skipped > 0 ? `（${skipped} 个同名条目已存在，未覆盖）` : '')
+      );
     } catch (err: any) {
-      alert('映射迁移失败: ' + err.message);
+      showNotice('error', formatActionError('映射迁移', err.message));
     } finally {
       setIsMapping(false);
     }
@@ -381,63 +506,176 @@ export const EditorView: React.FC = () => {
   // 8. 套用 Prompt 武器库里的提示词模版
   const handleApplyPrompt = async (promptTemplate: string) => {
     if (!apiKey) {
-      alert('请先配置模型 API');
+      showNotice('error', NO_API_KEY_MESSAGE);
       return;
     }
-    setIsExpanding(true);
-    try {
-      const result = await expandStoryDraft(
+    await runAiWrite('prompt', 'AI 技法写作', 'append', () =>
+      expandStoryDraft(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftContent,
         `${promptTemplate}（融入${currentAuthorStyle.name}文风）`,
         currentAuthorStyle
-      );
-      setDraftContent(draftContent + '\n\n' + result);
-    } catch (err: any) {
-      alert('AI 写作执行失败: ' + err.message);
-    } finally {
-      setIsExpanding(false);
-    }
+      )
+    );
   };
 
   const handleInsertText = (insertStr: string) => {
+    if (blockWhileWritingCurrentChapter()) return;
     setDraftContent(draftContent + insertStr);
   };
 
   const handleSaveChar = () => {
-    if (!charForm.name.trim()) return;
+    const error = validateUniqueName({
+      value: charForm.name,
+      existing: myCharacters.map((c) => c.name),
+      label: '角色姓名',
+      excludeIndex: editingCharIdx,
+    });
+    if (error) {
+      setCharError(error);
+      return;
+    }
+    const char = { ...charForm, name: charForm.name.trim() };
     if (editingCharIdx !== null) {
-      updateMyCharacter(editingCharIdx, charForm);
+      updateMyCharacter(editingCharIdx, char);
       setEditingCharIdx(null);
     } else {
-      addMyCharacter(charForm);
+      addMyCharacter(char);
       setShowAddChar(false);
     }
+    setCharError('');
     setCharForm({ name: '', role: '', status: '新登场', key_action: '', inner_motivation: '' });
   };
 
   const handleSaveWorld = () => {
-    if (!worldForm.term.trim()) return;
+    const error = validateUniqueName({
+      value: worldForm.term,
+      existing: myWorldElements.map((w) => w.term),
+      label: '设定名称',
+      excludeIndex: editingWorldIdx,
+    });
+    if (error) {
+      setWorldError(error);
+      return;
+    }
+    const element = { ...worldForm, term: worldForm.term.trim() };
     if (editingWorldIdx !== null) {
-      updateMyWorldElement(editingWorldIdx, worldForm);
+      updateMyWorldElement(editingWorldIdx, element);
       setEditingWorldIdx(null);
     } else {
-      addMyWorldElement(worldForm);
+      addMyWorldElement(element);
       setShowAddWorld(false);
     }
+    setWorldError('');
     setWorldForm({ term: '', category: '力量体系', description: '' });
   };
 
-  const handleCreateVolumeSubmit = () => {
-    if (!newVolumeTitle.trim()) return;
-    createVolume(newVolumeTitle.trim(), newVolumeDesc.trim());
-    setNewVolumeTitle('');
-    setNewVolumeDesc('');
-    setShowNewVolumeModal(false);
+  // 删除卡片后修正正在编辑的下标：删的正是编辑中的卡片就关闭表单，删的在它前面就前移一位，避免保存覆盖到别的卡片
+  const handleDeleteChar = (idx: number) => {
+    const deleted = myCharacters[idx];
+    deleteMyCharacter(idx);
+    showUndoNotice(`已删除角色「${deleted.name}」`, () => {
+      setMyCharacters(insertAt(useNovelStore.getState().myCharacters, idx, deleted));
+      setEditingCharIdx((cur) => (cur !== null && cur >= idx ? cur + 1 : cur));
+    });
+    if (editingCharIdx === idx) {
+      setEditingCharIdx(null);
+      setShowAddChar(false);
+      setCharError('');
+    } else if (editingCharIdx !== null && idx < editingCharIdx) {
+      setEditingCharIdx(editingCharIdx - 1);
+    }
   };
 
+  const handleDeleteWorld = (idx: number) => {
+    const deleted = myWorldElements[idx];
+    deleteMyWorldElement(idx);
+    showUndoNotice(`已删除设定「${deleted.term}」`, () => {
+      setMyWorldElements(insertAt(useNovelStore.getState().myWorldElements, idx, deleted));
+      setEditingWorldIdx((cur) => (cur !== null && cur >= idx ? cur + 1 : cur));
+    });
+    if (editingWorldIdx === idx) {
+      setEditingWorldIdx(null);
+      setShowAddWorld(false);
+      setWorldError('');
+    } else if (editingWorldIdx !== null && idx < editingWorldIdx) {
+      setEditingWorldIdx(editingWorldIdx - 1);
+    }
+  };
+
+  const showUndoNotice = (text: string, undo: () => void) =>
+    showNotice('info', text, {
+      durationMs: UNDO_NOTICE_MS,
+      action: {
+        label: '撤销',
+        onClick: () => {
+          undo();
+          dismissNotice();
+        },
+      },
+    });
+
+  const handleDeleteChapter = (chapterId: string) => {
+    const location = locateChapter(volumes, chapterId);
+    const chapter = findChapter(volumes, chapterId);
+    if (!location || !chapter) return;
+    const wasActive = activeChapterId === chapterId;
+    deleteChapter(chapterId);
+    showUndoNotice(`已删除章节「${chapterTitleOrDefault(chapter.title)}」`, () => {
+      if (!useNovelStore.getState().restoreChapter(location.volumeId, location.index, chapter)) {
+        showNotice('error', '原分卷已不存在，无法恢复该章节');
+        return;
+      }
+      if (wasActive) setActiveChapterId(chapter.id);
+    });
+  };
+
+  const handleVolumeFormSubmit = (title: string, description: string) => {
+    if (editingVolume) {
+      updateVolume(editingVolume.id, title, description);
+    } else {
+      createVolume(title, description);
+    }
+    setVolumeForm(null);
+  };
+
+  // 删除整卷与删除章节一样不弹确认，改为可撤销；撤销后若原先在写该卷的章节，切回那一章
+  const handleDeleteVolume = (volumeId: string) => {
+    const index = volumes.findIndex((v) => v.id === volumeId);
+    if (index < 0) return;
+    const volume = volumes[index];
+    const previousActiveId = activeChapterId;
+    const hadActive = volume.chapters.some((c) => c.id === previousActiveId);
+    deleteVolume(volumeId);
+    const chapterHint = volume.chapters.length > 0 ? `及其 ${volume.chapters.length} 个章节` : '';
+    showUndoNotice(`已删除分卷「${volume.title}」${chapterHint}`, () => {
+      useNovelStore.getState().restoreVolume(index, volume);
+      if (hadActive) setActiveChapterId(previousActiveId);
+    });
+  };
+
+  // 名家文风选择器：桌面端与手机端各渲染一处（位置不同），同一时刻只显示其中一个
+  const renderAuthorStyleSelector = (visibility: string) => (
+    <div className={`${visibility} items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1 max-md:py-0 text-xs shrink-0`}>
+      <Feather className="w-3 h-3 text-amber-400 shrink-0" />
+      <select
+        value={selectedAuthorStyleId}
+        onChange={(e) => setSelectedAuthorStyleId(e.target.value)}
+        aria-label="名家文风"
+        className="bg-transparent text-amber-300 font-semibold focus:outline-none cursor-pointer text-[11px] max-w-[7.5rem] sm:max-w-none"
+      >
+        {authorStyles.map((author) => (
+          <option key={author.id} value={author.id} className="bg-zinc-900 text-zinc-200">
+            {author.name}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+
   // 抽屉导航组件（桌面与移动端复用）
-  const renderSidebarContent = () => (
+  // 侧栏内容在桌面侧栏与手机抽屉各渲染一次，placement 用来生成不重复的元素 id
+  const renderSidebarContent = (placement: 'desktop' | 'drawer') => (
     <>
       {/* 四重视角导航栏 */}
       <div className="h-11 border-b border-zinc-800 px-2 flex items-center justify-between bg-zinc-950/70 shrink-0">
@@ -498,7 +736,7 @@ export const EditorView: React.FC = () => {
 
         {leftNav === 'projectTree' && (
           <button
-            onClick={() => setShowNewVolumeModal(true)}
+            onClick={() => setVolumeForm({ volumeId: null })}
             className="flex items-center gap-0.5 text-[10px] text-amber-400 hover:text-amber-300 bg-amber-500/10 border border-amber-500/30 px-1.5 py-1 rounded"
             title="新建分卷"
           >
@@ -513,21 +751,39 @@ export const EditorView: React.FC = () => {
         <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
           {volumes.map((vol) => (
             <div key={vol.id} className="rounded-xl bg-zinc-900/80 border border-zinc-800 overflow-hidden">
-              <div className="p-2.5 bg-zinc-900 border-b border-zinc-800/80 flex items-center justify-between">
-                <div className="truncate">
+              <div className="p-2.5 bg-zinc-900 border-b border-zinc-800/80 flex items-center justify-between gap-2">
+                <div className="truncate min-w-0">
                   <span className="font-semibold text-zinc-200 block truncate">{vol.title}</span>
                   {vol.description && (
                     <span className="text-[10px] text-zinc-500 truncate block">{vol.description}</span>
                   )}
                 </div>
-                <button
-                  onClick={() => createChapter(vol.id, `第 ${vol.chapters.length + 1} 章`)}
-                  className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-400 text-[10px] flex items-center gap-0.5 shrink-0"
-                  title="在本卷中新增章节"
-                >
-                  <FilePlus className="w-3 h-3" />
-                  <span>加章</span>
-                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => setVolumeForm({ volumeId: vol.id })}
+                    className="p-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800"
+                    title="编辑分卷"
+                    aria-label={`编辑分卷「${vol.title}」`}
+                  >
+                    <Edit2 className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={() => handleDeleteVolume(vol.id)}
+                    className="p-1 rounded text-zinc-500 hover:text-rose-400 hover:bg-zinc-800"
+                    title="删除分卷"
+                    aria-label={`删除分卷「${vol.title}」`}
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={() => createChapter(vol.id, `第 ${vol.chapters.length + 1} 章`)}
+                    className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-400 text-[10px] flex items-center gap-0.5"
+                    title="在本卷中新增章节"
+                  >
+                    <FilePlus className="w-3 h-3" />
+                    <span>加章</span>
+                  </button>
+                </div>
               </div>
 
               <div className="divide-y divide-zinc-800/40">
@@ -551,21 +807,22 @@ export const EditorView: React.FC = () => {
                           ) : (
                             <Circle className="w-3 h-3 text-amber-500/60 shrink-0" />
                           )}
-                          <span className="font-medium truncate">{ch.title}</span>
+                          <span className="font-medium truncate">{chapterTitleOrDefault(ch.title)}</span>
                         </div>
                         <span className="text-[10px] text-zinc-500 ml-4 font-mono">{ch.word_count} 字</span>
                       </div>
 
                       <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        {/* 外层按钮透明、手机端撑到 36px 可点区域，底色留在内层小标签上 */}
                         <button
                           onClick={() => updateChapterStatus(ch.id, ch.status === 'completed' ? 'draft' : 'completed')}
-                          className="text-[9px] px-1 py-0.5 rounded bg-zinc-950 text-zinc-400 hover:text-zinc-200"
+                          className="text-[10px] text-zinc-400 hover:text-zinc-200 max-md:min-w-9"
                           title="切换定稿状态"
                         >
-                          {ch.status === 'completed' ? '已定稿' : '草稿'}
+                          <span className="inline-block px-1 py-0.5 rounded bg-zinc-950">{ch.status === 'completed' ? '已定稿' : '草稿'}</span>
                         </button>
                         <button
-                          onClick={() => deleteChapter(ch.id)}
+                          onClick={() => handleDeleteChapter(ch.id)}
                           className="text-zinc-600 hover:text-rose-400 p-0.5"
                           title="删除章节"
                         >
@@ -612,6 +869,7 @@ export const EditorView: React.FC = () => {
                 onClick={() => {
                   setEditingCharIdx(null);
                   setCharForm({ name: '', role: '', status: '新登场', key_action: '', inner_motivation: '' });
+                  setCharError('');
                   setShowAddChar(true);
                 }}
                 className="text-[10px] text-amber-400 hover:text-amber-300"
@@ -623,6 +881,7 @@ export const EditorView: React.FC = () => {
                 onClick={() => {
                   setEditingWorldIdx(null);
                   setWorldForm({ term: '', category: '力量体系', description: '' });
+                  setWorldError('');
                   setShowAddWorld(true);
                 }}
                 className="text-[10px] text-emerald-400 hover:text-emerald-300"
@@ -644,9 +903,15 @@ export const EditorView: React.FC = () => {
                       type="text"
                       placeholder="角色姓名 (如: 林宵)"
                       value={charForm.name}
-                      onChange={(e) => setCharForm({ ...charForm, name: e.target.value })}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs"
+                      maxLength={DEFAULT_NAME_MAX_LENGTH}
+                      aria-invalid={!!charError}
+                      onChange={(e) => {
+                        setCharForm({ ...charForm, name: e.target.value });
+                        setCharError('');
+                      }}
+                      className={`w-full bg-zinc-900 border rounded px-2 py-1 text-xs ${charError ? 'border-rose-500/60' : 'border-zinc-800'}`}
                     />
+                    {charError && <p role="alert" className="text-[11px] text-rose-400">{charError}</p>}
                     <input
                       type="text"
                       placeholder="身份定位 (如: 男主 / 贫民窟脑机散修)"
@@ -670,7 +935,7 @@ export const EditorView: React.FC = () => {
                     />
                     <div className="flex justify-end gap-1.5 pt-1">
                       <button
-                        onClick={() => { setShowAddChar(false); setEditingCharIdx(null); }}
+                        onClick={() => { setShowAddChar(false); setEditingCharIdx(null); setCharError(''); }}
                         className="px-2 py-0.5 rounded text-[10px] text-zinc-400 hover:bg-zinc-800"
                       >
                         取消
@@ -683,6 +948,12 @@ export const EditorView: React.FC = () => {
                       </button>
                     </div>
                   </div>
+                )}
+
+                {myCharacters.length === 0 && !showAddChar && (
+                  <p className="py-6 text-center text-[11px] text-zinc-500 leading-relaxed">
+                    还没有人物卡。点「+ 加人物」手动创建；拆解过原著后，也可以点「映射」把原著角色转译成新书人物
+                  </p>
                 )}
 
                 {myCharacters.map((c, idx) => (
@@ -704,6 +975,7 @@ export const EditorView: React.FC = () => {
                           onClick={() => {
                             setEditingCharIdx(idx);
                             setCharForm(c);
+                            setCharError('');
                             setShowAddChar(true);
                           }}
                           className="text-zinc-500 hover:text-zinc-300 p-0.5"
@@ -711,7 +983,7 @@ export const EditorView: React.FC = () => {
                           <Edit2 className="w-3 h-3" />
                         </button>
                         <button
-                          onClick={() => deleteMyCharacter(idx)}
+                          onClick={() => handleDeleteChar(idx)}
                           className="text-zinc-500 hover:text-rose-400 p-0.5"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -737,9 +1009,15 @@ export const EditorView: React.FC = () => {
                       type="text"
                       placeholder="设定名称 (如: 太上感应铜钱)"
                       value={worldForm.term}
-                      onChange={(e) => setWorldForm({ ...worldForm, term: e.target.value })}
-                      className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs"
+                      maxLength={DEFAULT_NAME_MAX_LENGTH}
+                      aria-invalid={!!worldError}
+                      onChange={(e) => {
+                        setWorldForm({ ...worldForm, term: e.target.value });
+                        setWorldError('');
+                      }}
+                      className={`w-full bg-zinc-900 border rounded px-2 py-1 text-xs ${worldError ? 'border-rose-500/60' : 'border-zinc-800'}`}
                     />
+                    {worldError && <p role="alert" className="text-[11px] text-rose-400">{worldError}</p>}
                     <select
                       value={worldForm.category}
                       onChange={(e: any) => setWorldForm({ ...worldForm, category: e.target.value })}
@@ -759,7 +1037,7 @@ export const EditorView: React.FC = () => {
                     />
                     <div className="flex justify-end gap-1.5 pt-1">
                       <button
-                        onClick={() => { setShowAddWorld(false); setEditingWorldIdx(null); }}
+                        onClick={() => { setShowAddWorld(false); setEditingWorldIdx(null); setWorldError(''); }}
                         className="px-2 py-0.5 rounded text-[10px] text-zinc-400 hover:bg-zinc-800"
                       >
                         取消
@@ -772,6 +1050,12 @@ export const EditorView: React.FC = () => {
                       </button>
                     </div>
                   </div>
+                )}
+
+                {myWorldElements.length === 0 && !showAddWorld && (
+                  <p className="py-6 text-center text-[11px] text-zinc-500 leading-relaxed">
+                    还没有设定词条。点「+ 加设定」记录力量体系、势力与规则，防吃设定会据此检查正文
+                  </p>
                 )}
 
                 {myWorldElements.map((w, idx) => (
@@ -788,11 +1072,12 @@ export const EditorView: React.FC = () => {
                         <PenTool className="w-2.5 h-2.5 opacity-40 group-hover:opacity-100" />
                       </button>
                       <div className="flex items-center gap-1">
-                        <span className="text-[9px] bg-zinc-950 text-zinc-500 px-1 rounded">{w.category}</span>
+                        <span className="text-[10px] bg-zinc-950 text-zinc-500 px-1 rounded">{w.category}</span>
                         <button
                           onClick={() => {
                             setEditingWorldIdx(idx);
                             setWorldForm(w);
+                            setWorldError('');
                             setShowAddWorld(true);
                           }}
                           className="text-zinc-500 hover:text-zinc-300 p-0.5"
@@ -800,7 +1085,7 @@ export const EditorView: React.FC = () => {
                           <Edit2 className="w-3 h-3" />
                         </button>
                         <button
-                          onClick={() => deleteMyWorldElement(idx)}
+                          onClick={() => handleDeleteWorld(idx)}
                           className="text-zinc-500 hover:text-rose-400 p-0.5"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -830,7 +1115,7 @@ export const EditorView: React.FC = () => {
                   <Zap className="w-3 h-3 text-amber-400" />
                   {p.name}
                 </span>
-                <span className="text-[9px] bg-amber-500/10 text-amber-300 border border-amber-500/20 px-1.5 py-0.5 rounded">
+                <span className="text-[10px] bg-amber-500/10 text-amber-300 border border-amber-500/20 px-1.5 py-0.5 rounded">
                   {p.category_label}
                 </span>
               </div>
@@ -841,8 +1126,9 @@ export const EditorView: React.FC = () => {
                   handleApplyPrompt(p.prompt_template);
                   setShowMobileDrawer(false);
                 }}
-                disabled={isExpanding}
-                className="w-full py-1.5 rounded bg-zinc-800 hover:bg-amber-500 hover:text-zinc-950 text-zinc-300 text-[10px] font-medium transition-colors flex items-center justify-center gap-1 disabled:opacity-50"
+                disabled={!!aiWrite}
+                title={aiWriteBusyTitle}
+                className="w-full py-1.5 rounded bg-zinc-800 hover:bg-amber-500 hover:text-zinc-950 text-zinc-300 text-[10px] font-medium transition-colors flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-zinc-800 disabled:hover:text-zinc-300"
               >
                 <Sparkles className="w-3 h-3" />
                 <span>套用此手法续写</span>
@@ -855,6 +1141,29 @@ export const EditorView: React.FC = () => {
       {/* 视角 4：原著研习对照 */}
       {leftNav === 'reference' && (
         <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
+          {novel && activeChapter && (
+            <div className="space-y-1">
+              <label htmlFor={`reference-chapter-select-${placement}`} className="block text-[11px] text-zinc-400">
+                「{chapterTitleOrDefault(activeChapter.title)}」参考的原著章节
+              </label>
+              <select
+                id={`reference-chapter-select-${placement}`}
+                value={activeChapter.reference_chapter_id !== undefined && referenceChapterId === activeChapter.reference_chapter_id ? String(referenceChapterId) : ''}
+                onChange={(e) =>
+                  setChapterReference(activeChapter.id, e.target.value === '' ? undefined : Number(e.target.value))
+                }
+                className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-[11px] text-zinc-200 focus:outline-none focus:border-amber-500"
+              >
+                <option value="">跟随拆解页当前章节{followedChapter ? `（${followedChapter.title}）` : ''}</option>
+                {novel.chapters.map((c) => (
+                  <option key={c.id} value={String(c.id)}>
+                    {c.title}{analyses[c.id] ? ` · ★${analyses[c.id].tension_score}` : '（未拆解）'}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {currentAnalysis ? (
             <div className="space-y-3">
               <div className="p-3 rounded-lg bg-zinc-900 border border-amber-500/20 space-y-2">
@@ -868,11 +1177,11 @@ export const EditorView: React.FC = () => {
                 </div>
                 <div className="p-2 bg-zinc-950 rounded text-zinc-300 text-[11px]">
                   <strong className="text-amber-300 block mb-0.5">原著悬念钩子 (Hook):</strong>
-                  {currentAnalysis.narrative_hook}
+                  {currentAnalysis.narrative_hook || <span className="text-zinc-500">模型未给出</span>}
                 </div>
                 <div className="text-[11px] text-zinc-400">
                   <strong className="text-purple-400 block mb-0.5">名家技法手记:</strong>
-                  {currentAnalysis.technique_notes}
+                  {currentAnalysis.technique_notes || <span className="text-zinc-500">模型未给出</span>}
                 </div>
               </div>
 
@@ -881,6 +1190,9 @@ export const EditorView: React.FC = () => {
                   原著角色定位原型 ({globalCharacters.length} 位)
                 </span>
                 <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                  {globalCharacters.length === 0 && (
+                    <p className="text-[11px] text-zinc-500">拆解原著章节后，出场角色会自动汇总到这里</p>
+                  )}
                   {globalCharacters.map((c, i) => (
                     <div key={i} className="p-1.5 bg-zinc-950 rounded text-[11px]">
                       <span className="font-semibold text-zinc-200">{c.name}</span>
@@ -892,8 +1204,12 @@ export const EditorView: React.FC = () => {
               </div>
             </div>
           ) : (
-            <div className="p-4 text-center text-zinc-500">
-              尚未在拆解坊选择章节，请先在拆解坊载入小说
+            <div className="p-4 text-center text-zinc-500 leading-relaxed">
+              {!novel
+                ? '尚未载入原著小说，请先在「研习拆解坊」导入或从书库打开一本小说'
+                : referenceChapter
+                  ? `「${referenceChapter.title}」尚未拆解，在研习拆解坊点击「逆向拆解」后，这里会显示该章的钩子与技法`
+                  : '请在上方选择本章参考的原著章节'}
             </div>
           )}
         </div>
@@ -902,24 +1218,38 @@ export const EditorView: React.FC = () => {
   );
 
   return (
-    <div className="flex-1 flex overflow-hidden bg-zinc-950 text-zinc-100 relative pb-14 md:pb-0">
+    <div className="flex-1 flex overflow-hidden bg-zinc-950 text-zinc-100 relative pb-mobile-nav md:pb-0">
       {/* 桌面端左侧固定抽屉 */}
       {!isZenMode && (
         <aside className="w-84 border-r border-zinc-800 bg-zinc-900/30 hidden md:flex flex-col shrink-0 overflow-hidden">
-          {renderSidebarContent()}
+          {renderSidebarContent('desktop')}
         </aside>
       )}
 
       {/* 🌟 手机端滑出抽屉 (Mobile Bottom Sheet / Side Drawer) 🌟 */}
       {showMobileDrawer && !isZenMode && (
-        <div className="md:hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col justify-end">
-          <div className="bg-zinc-900 border-t border-zinc-800 rounded-t-2xl max-h-[80vh] flex flex-col overflow-hidden animate-in slide-in-from-bottom duration-200">
+        <div
+          className="md:hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col justify-end"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeMobileDrawer();
+          }}
+        >
+          <div
+            ref={mobileDrawerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="创作大纲与资产"
+            tabIndex={-1}
+            className="bg-zinc-900 border-t border-zinc-800 rounded-t-2xl max-h-[80dvh] pb-[env(safe-area-inset-bottom)] flex flex-col overflow-hidden animate-slide-in-bottom motion-reduce:animate-none focus:outline-none"
+          >
             <div className="p-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-950">
               <span className="text-xs font-bold text-zinc-200">创作大纲与资产</span>
-              <button onClick={() => setShowMobileDrawer(false)} className="text-zinc-400 p-1 text-xs">✕ 关闭</button>
+              <button onClick={closeMobileDrawer} className="text-zinc-400 p-1 text-xs">✕ 关闭</button>
             </div>
+            {/* 抽屉遮罩会盖住编辑区的提示条，这里同步显示一份，保证在抽屉里删除后能直接点「撤销」 */}
+            <EditorNotice notice={notice} onDismiss={dismissNotice} />
             <div className="flex-1 flex flex-col overflow-hidden">
-              {renderSidebarContent()}
+              {renderSidebarContent('drawer')}
             </div>
           </div>
         </div>
@@ -927,10 +1257,11 @@ export const EditorView: React.FC = () => {
 
       {/* 2. 中间沉浸式编辑器 + AI 赋能操作条 */}
       <main className="flex-1 flex flex-col overflow-hidden bg-zinc-950">
-        {/* 编辑器顶栏与 AI 写作套件 (手机端支持横向滑动操作条) */}
-        <div className="border-b border-zinc-800 px-3 md:px-5 py-2.5 flex flex-col md:flex-row md:items-center justify-between gap-2.5 bg-zinc-900/40 shrink-0">
+        {/* 编辑器顶栏与 AI 写作套件 (手机端横向滑动操作条；桌面端宽度不足时标题与工具栏分两行，工具栏可换行，避免「送审」等按钮被挤出视野) */}
+        <div className="border-b border-zinc-800 px-3 md:px-5 py-2.5 flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-2.5 bg-zinc-900/40 shrink-0">
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 flex-1">
+            {/* min-w-0：手机端输入框为 16px 时默认宽度变大，不加会撑破顶栏 */}
+            <div className="flex items-center gap-2 flex-1 min-w-0">
               {/* 手机端展开侧栏按钮 */}
               <button
                 onClick={() => setShowMobileDrawer(true)}
@@ -945,33 +1276,26 @@ export const EditorView: React.FC = () => {
                 value={draftTitle}
                 onChange={(e) => setDraftTitle(e.target.value)}
                 placeholder="章节标题..."
-                className="bg-transparent text-xs md:text-sm font-semibold text-zinc-100 focus:outline-none flex-1 md:w-64 border-b border-transparent focus:border-amber-500 pb-0.5"
+                className="bg-transparent text-xs md:text-sm font-semibold text-zinc-100 focus:outline-none flex-1 min-w-0 max-md:min-h-9 md:w-64 border-b border-transparent focus:border-amber-500 pb-0.5"
               />
             </div>
 
-            {/* 名家文风选择器 */}
-            <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1 text-xs shrink-0">
-              <Feather className="w-3 h-3 text-amber-400 shrink-0" />
-              <select
-                value={selectedAuthorStyleId}
-                onChange={(e) => setSelectedAuthorStyleId(e.target.value)}
-                className="bg-transparent text-amber-300 font-semibold focus:outline-none cursor-pointer text-[11px] max-w-[90px] sm:max-w-none"
-              >
-                {authorStyles.map((author) => (
-                  <option key={author.id} value={author.id} className="bg-zinc-900 text-zinc-200">
-                    {author.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {/* 名家文风选择器：桌面端在标题右侧，手机端移到工具栏首位，把整行留给章节标题 */}
+            {renderAuthorStyleSelector('hidden md:flex')}
           </div>
 
-          {/* AI 写作工具栏 (手机端可横向滚动，极度丝滑) */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 scrollbar-none">
+          {/* AI 写作工具栏 (手机端可横向滚动；还有按钮藏在哪一侧，哪一侧就渐隐提示可滑动) */}
+          <div
+            ref={toolbarScroll.ref}
+            style={{ maskImage: toolbarScroll.mask, WebkitMaskImage: toolbarScroll.mask }}
+            className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 md:flex-wrap md:overflow-visible scrollbar-none"
+          >
+            {renderAuthorStyleSelector('flex md:hidden')}
             <button
               onClick={handleGenerateInspiration}
-              disabled={isGenerating}
-              className="flex items-center gap-1 px-2.5 py-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 text-zinc-950 font-semibold rounded-md text-xs shadow-md shadow-amber-500/10 disabled:opacity-50 shrink-0"
+              disabled={!!aiWrite}
+              title={aiWriteBusyTitle}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 text-zinc-950 font-semibold rounded-md text-xs shadow-md shadow-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
             >
               {isGenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
               <span>示范初稿</span>
@@ -979,8 +1303,9 @@ export const EditorView: React.FC = () => {
 
             <button
               onClick={handleExpand}
-              disabled={isExpanding}
-              className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-md text-xs border border-zinc-700 disabled:opacity-50 shrink-0"
+              disabled={!!aiWrite}
+              title={aiWriteBusyTitle}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-md text-xs border border-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
             >
               {isExpanding ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5 text-blue-400" />}
               <span>续写</span>
@@ -988,8 +1313,9 @@ export const EditorView: React.FC = () => {
 
             <button
               onClick={handlePolish}
-              disabled={isPolishing}
-              className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-md text-xs border border-zinc-700 disabled:opacity-50 shrink-0"
+              disabled={!!aiWrite}
+              title={aiWriteBusyTitle}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-md text-xs border border-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
             >
               {isPolishing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5 text-purple-400" />}
               <span>润色</span>
@@ -1040,6 +1366,8 @@ export const EditorView: React.FC = () => {
             {/* Zen 模式切换 */}
             <button
               onClick={() => setIsZenMode(!isZenMode)}
+              title={isZenMode ? '退出专注模式' : '专注模式'}
+              aria-label={isZenMode ? '退出专注模式' : '专注模式'}
               className="p-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs border border-zinc-700 shrink-0"
             >
               {isZenMode ? <Minimize2 className="w-3.5 h-3.5 text-amber-400" /> : <Maximize2 className="w-3.5 h-3.5" />}
@@ -1057,45 +1385,52 @@ export const EditorView: React.FC = () => {
 
         {/* 自动保存浮动 Toast */}
         {saveToast && (
-          <div className="absolute top-16 right-4 md:right-8 z-40 bg-zinc-900 border border-emerald-500/40 text-emerald-400 text-xs px-3 py-1.5 rounded-lg shadow-xl flex items-center gap-1.5 animate-in fade-in duration-200">
+          <div className="absolute top-16 right-4 md:right-8 z-40 bg-zinc-900 border border-emerald-500/40 text-emerald-400 text-xs px-3 py-1.5 rounded-lg shadow-xl flex items-center gap-1.5 animate-fade-in motion-reduce:animate-none">
             <Save className="w-3.5 h-3.5" />
             <span>已保存</span>
           </div>
         )}
 
+        {/* AI 写入状态：进行中（本章只读）/ 完成后可撤销一步 */}
+        {isWritingCurrentChapter && (
+          <div role="status" className="px-3 md:px-6 py-2 bg-amber-500/10 border-b border-amber-500/20 flex items-center gap-2 text-[11px] text-amber-300 shrink-0">
+            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            <span>AI 正在「{aiWrite?.label}」，完成前本章暂不可编辑…</span>
+          </div>
+        )}
+        {canUndoAiEdit && lastAiEdit && (
+          <div className="px-3 md:px-6 py-2 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between gap-2 text-[11px] shrink-0">
+            <span className="text-zinc-300">已完成「{lastAiEdit.label}」并写入本章。</span>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                onClick={undoLastAiEdit}
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+                <span>撤销</span>
+              </button>
+              <button onClick={dismissLastAiEdit} aria-label="关闭撤销提示" className="text-zinc-500 hover:text-zinc-300 px-1">✕</button>
+            </div>
+          </div>
+        )}
+
+        <EditorNotice notice={notice} onDismiss={dismissNotice} />
+
         {/* 实时节奏诊断状态条 */}
         {diagnosis && (
-          <div className="px-3 md:px-6 py-2 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between text-xs animate-in fade-in duration-300 shrink-0">
+          <div className="px-3 md:px-6 py-2 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between text-xs animate-fade-in motion-reduce:animate-none shrink-0">
             <div className="flex items-center gap-3 overflow-x-auto text-[11px] whitespace-nowrap">
               <span className="text-zinc-400">吻合度: <strong className={diagnosis.match_score >= 80 ? 'text-emerald-400' : 'text-amber-400'}>{diagnosis.match_score}%</strong></span>
               <span className="text-zinc-400">张力: <strong className="text-amber-400">★{diagnosis.tension_score}</strong></span>
               <span className="text-zinc-300 font-sans border-l border-zinc-800 pl-2">💡 {diagnosis.instant_feedback}</span>
             </div>
-            <button onClick={() => setDiagnosis(null)} className="text-zinc-500 hover:text-zinc-300 text-xs pl-2">✕</button>
+            <button onClick={() => setDiagnosisResult(null)} aria-label="关闭诊断结果" className="text-zinc-500 hover:text-zinc-300 text-xs pl-2">✕</button>
           </div>
         )}
 
         {/* 防吃设定一致性检测报告横幅 */}
         {consistencyReport && (
-          <div className={`px-4 py-2.5 border-b text-xs shrink-0 animate-in fade-in duration-300 ${
-            consistencyReport.is_consistent 
-              ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300' 
-              : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
-          }`}>
-            <div className="flex items-center justify-between mb-1">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className={`w-4 h-4 ${consistencyReport.is_consistent ? 'text-emerald-400' : 'text-rose-400'}`} />
-                <span className="font-semibold text-xs">
-                  {consistencyReport.is_consistent ? '设定严密性通过' : '发现设定逻辑冲突'}
-                </span>
-                <span className="font-mono px-1.5 py-0.2 rounded bg-zinc-900 text-amber-400 text-[10px]">
-                  {consistencyReport.consistency_score}分
-                </span>
-              </div>
-              <button onClick={() => setConsistencyReport(null)} className="text-zinc-400">✕</button>
-            </div>
-            <p className="text-[11px] text-zinc-300">{consistencyReport.overall_summary}</p>
-          </div>
+          <ConsistencyReportBanner report={consistencyReport} onClose={() => setConsistencyResult(null)} />
         )}
 
         {/* 正文输入主画布 */}
@@ -1106,10 +1441,12 @@ export const EditorView: React.FC = () => {
             <textarea
               value={draftContent}
               onChange={(e) => setDraftContent(e.target.value)}
+              readOnly={isWritingCurrentChapter}
+              aria-busy={isWritingCurrentChapter}
               placeholder={`在此仿写...当前文风：【${currentAuthorStyle.name}】`}
               className={`w-full flex-1 bg-transparent text-zinc-200 font-serif leading-loose resize-none focus:outline-none placeholder:text-zinc-700 select-text ${
                 isZenMode ? 'text-base min-h-[600px]' : 'text-sm min-h-[400px]'
-              }`}
+              } ${isWritingCurrentChapter ? 'opacity-60 cursor-wait' : ''}`}
             />
 
             <div className="pt-3 flex items-center justify-between border-t border-zinc-800/60 text-xs text-zinc-500 font-mono">
@@ -1121,15 +1458,15 @@ export const EditorView: React.FC = () => {
             </div>
           </div>
 
-          {/* 右侧主编逐段旁批抽屉 (手机端全屏覆盖或底部滑出) */}
+          {/* 右侧主编逐段旁批抽屉：手机全屏覆盖；平板 / 小桌面（< xl）在右侧浮层覆盖，不挤占正文；xl 起才作为并排侧栏 */}
           {showCritiqueDrawer && !isZenMode && (
-            <aside className="w-full md:w-96 border-l border-zinc-800 bg-zinc-900/90 md:bg-zinc-900/60 flex flex-col shrink-0 overflow-hidden absolute md:relative inset-0 md:inset-auto z-40 md:z-auto animate-in slide-in-from-right duration-200">
+            <aside className="w-full sm:w-96 border-l border-zinc-800 bg-zinc-900 xl:bg-zinc-900/60 flex flex-col shrink-0 overflow-hidden absolute xl:relative inset-y-0 right-0 xl:inset-auto z-40 xl:z-auto shadow-2xl shadow-black/60 xl:shadow-none animate-slide-in-right motion-reduce:animate-none">
               <div className="h-11 border-b border-zinc-800 px-3 flex items-center justify-between bg-zinc-950">
                 <div className="flex items-center gap-1.5">
                   <MessageSquareCode className="w-4 h-4 text-amber-400" />
                   <span className="text-xs font-semibold text-zinc-200">白金主编逐段批注与改写</span>
                 </div>
-                <button onClick={() => setShowCritiqueDrawer(false)} className="text-zinc-500 hover:text-zinc-300 text-xs p-1">✕</button>
+                <button onClick={() => setShowCritiqueDrawer(false)} aria-label="关闭主编旁批" className="text-zinc-500 hover:text-zinc-300 text-xs p-1">✕</button>
               </div>
 
               <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
@@ -1174,7 +1511,9 @@ export const EditorView: React.FC = () => {
                                   setShowCritiqueDrawer(false);
                                 }
                               }}
-                              className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                              disabled={isWritingCurrentChapter}
+                              title={isWritingCurrentChapter ? aiWriteBusyTitle : undefined}
+                              className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500/20 disabled:hover:text-amber-300"
                             >
                               <Check className="w-3 h-3" />
                               <span>采纳改写</span>
@@ -1195,52 +1534,15 @@ export const EditorView: React.FC = () => {
         </div>
       </main>
 
-      {/* 新建分卷模态框 */}
-      {showNewVolumeModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
-            <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-1.5">
-              <FolderPlus className="w-4 h-4 text-amber-400" />
-              创建新分卷
-            </h3>
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="block text-zinc-300 mb-1">分卷标题</label>
-                <input
-                  type="text"
-                  placeholder="例如: 第三卷：深渊之门与旧神低语"
-                  value={newVolumeTitle}
-                  onChange={(e) => setNewVolumeTitle(e.target.value)}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded p-2 text-zinc-100"
-                />
-              </div>
-              <div>
-                <label className="block text-zinc-300 mb-1">分卷核心主线/高潮目标 (可选)</label>
-                <textarea
-                  rows={2}
-                  placeholder="例如: 主角潜入深渊裂隙，完成序列突破并击杀初代堕落者"
-                  value={newVolumeDesc}
-                  onChange={(e) => setNewVolumeDesc(e.target.value)}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded p-2 text-zinc-100"
-                />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                onClick={() => setShowNewVolumeModal(false)}
-                className="px-3 py-1.5 rounded text-xs text-zinc-400 hover:bg-zinc-800"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleCreateVolumeSubmit}
-                className="px-4 py-1.5 rounded text-xs bg-amber-500 hover:bg-amber-600 text-zinc-950 font-semibold"
-              >
-                确定创建
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* 新建 / 编辑分卷模态框 */}
+      {volumeForm && (
+        <VolumeFormModal
+          initial={editingVolume ? { title: editingVolume.title, description: editingVolume.description } : undefined}
+          existingTitles={volumes.map((v) => v.title)}
+          editingIndex={editingVolume ? editingVolumeIndex : undefined}
+          onSubmit={handleVolumeFormSubmit}
+          onClose={() => setVolumeForm(null)}
+        />
       )}
 
       {/* 全书归档导出模态框 */}

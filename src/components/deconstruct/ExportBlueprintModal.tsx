@@ -7,8 +7,11 @@ import {
   Copy, 
   Check, 
   BookMarked, 
-  Feather
+  Feather,
+  X
 } from 'lucide-react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { copyText } from '../../utils/clipboard';
 
 interface Props {
   novel: NovelMetadata;
@@ -25,8 +28,9 @@ export const ExportBlueprintModal: React.FC<Props> = ({
   worldElements,
   onClose,
 }) => {
-  const { setActiveTab, setDraftTitle, setDraftContent, addIdea, setSelectedIdeaId } = useNovelStore();
-  const [copied, setCopied] = useState(false);
+  const { setActiveTab, setDraftContent, createVolume, createChapter, addIdea, setSelectedIdeaId } = useNovelStore();
+  const [copyState, setCopyState] = useState<'idle' | 'done' | 'failed'>('idle');
+  const dialogRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
   const analyzedList = Object.values(analyses).sort((a, b) => a.chapter_id - b.chapter_id);
 
@@ -100,9 +104,11 @@ export const ExportBlueprintModal: React.FC<Props> = ({
     onClose();
   };
 
-  // 动作 2：一键载入【仿写创作台】
+  // 动作 2：一键载入【仿写创作台】——新建一卷一章承载仿写指引，不覆盖当前正在写的章节
   const handleLoadIntoEditor = () => {
-    setDraftTitle(`《仿${novel.file_name.replace(/\.[^/.]+$/, '')}节奏》第一章：`);
+    const bookName = novel.file_name.replace(/\.[^/.]+$/, '');
+    const volumeId = createVolume(`《仿${bookName}节奏》第一卷`, `参考《${bookName}》黄金开篇的仿写练习`);
+    createChapter(volumeId, '第一章');
     let promptGuide = `【本章仿写指引（参考原著黄金开篇）】\n`;
     promptGuide += `1. 核心目标：前 300 字抛出核心危机，模仿原著开局的悬念手法：“${firstHook}”。\n`;
     promptGuide += `2. 节奏张力指标：本章目标张力 ≥ ${analyzedList[0]?.tension_score || 8} 分。\n`;
@@ -115,28 +121,35 @@ export const ExportBlueprintModal: React.FC<Props> = ({
   };
 
   // 复制 Markdown
-  const handleCopyMarkdown = () => {
-    navigator.clipboard.writeText(generateMarkdown());
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopyMarkdown = async () => {
+    const ok = await copyText(generateMarkdown());
+    setCopyState(ok ? 'done' : 'failed');
+    setTimeout(() => setCopyState('idle'), ok ? 2000 : 4000);
   };
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="blueprint-dialog-title"
+        tabIndex={-1}
+        className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-2xl w-full p-5 sm:p-6 shadow-2xl space-y-5 max-h-[85dvh] overflow-y-auto focus:outline-none"
+      >
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center">
               <Sparkles className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-zinc-100">
+              <h3 id="blueprint-dialog-title" className="text-sm font-bold text-zinc-100">
                 提炼创作蓝图与快速学习复用
               </h3>
               <p className="text-[11px] text-zinc-400">将拆解成果一键转化为你的写作武器库</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200 text-xs">✕</button>
+          <button onClick={onClose} aria-label="关闭提炼模版" className="text-zinc-400 hover:text-zinc-200 p-1"><X className="w-4 h-4" /></button>
         </div>
 
         {/* 提炼出的公式卡 */}
@@ -199,17 +212,20 @@ export const ExportBlueprintModal: React.FC<Props> = ({
         </div>
 
         {/* 导出 Markdown 笔记 */}
-        <div className="pt-2 border-t border-zinc-800 flex items-center justify-between">
+        {/* 窄屏放不下时按钮换到下一行，按钮文字不折行 */}
+        <div className="pt-2 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2">
           <span className="text-[11px] text-zinc-500">
             支持完整导出为 Obsidian / 写作软件双链笔记结构
           </span>
-          <div className="flex gap-2">
+          <div className="flex gap-2 ml-auto">
             <button
               onClick={handleCopyMarkdown}
-              className="px-3 py-1.5 rounded-md text-xs font-medium border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-md text-xs font-medium border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 flex items-center gap-1.5 whitespace-nowrap"
             >
-              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copied ? '已复制全套 Markdown' : '复制拆解研习笔记'}</span>
+              {copyState === 'done' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              <span aria-live="polite" className={copyState === 'failed' ? 'text-rose-300' : undefined}>
+              {copyState === 'done' ? '已复制全套 Markdown' : copyState === 'failed' ? '复制失败，请手动选中复制' : '复制拆解研习笔记'}
+            </span>
             </button>
           </div>
         </div>

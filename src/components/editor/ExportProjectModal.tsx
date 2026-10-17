@@ -3,8 +3,12 @@ import {
   Copy, 
   Check, 
   BookMarked, 
-  FileText
+  FileText,
+  X
 } from 'lucide-react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
+import { copyText } from '../../utils/clipboard';
+import { chapterTitleOrDefault } from '../../stores/chapterOps';
 import React, { useState } from 'react';
 import { useNovelStore } from '../../stores/novelStore';
 
@@ -13,9 +17,12 @@ interface Props {
 }
 
 export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
+  const dialogRef = useFocusTrap<HTMLDivElement>(true, onClose);
   const { volumes, myCharacters, myWorldElements, draftTitle, ideas, selectedIdeaId } = useNovelStore();
   const [exportFormat, setExportFormat] = useState<'markdown' | 'txt' | 'dossier'>('markdown');
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'done' | 'failed'>('idle');
+  // 下载触发后提示文件名；浏览器不会回报是否保存成功，只能告知去哪里找
+  const [downloadedName, setDownloadedName] = useState<string | null>(null);
 
   const currentIdea = ideas.find(i => i.id === selectedIdeaId);
   const bookTitle = currentIdea?.title || draftTitle.split('：')[0].replace(/[《》]/g, '') || '我的小说作品';
@@ -33,7 +40,7 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
       text += `====================================\n\n`;
 
       v.chapters.forEach(c => {
-        text += `\n${c.title}\n\n`;
+        text += `\n${chapterTitleOrDefault(c.title)}\n\n`;
         text += `${c.content || '（暂无正文）'}\n\n`;
       });
     });
@@ -53,7 +60,7 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
     volumes.forEach((v, vi) => {
       md += `### ${v.title}\n`;
       v.chapters.forEach((c, ci) => {
-        md += `- [${c.title}](#chapter-${vi}-${ci}) (${c.word_count}字 - ${c.status === 'completed' ? '已定稿' : '草稿'})\n`;
+        md += `- [${chapterTitleOrDefault(c.title)}](#chapter-${vi}-${ci}) (${c.word_count}字 - ${c.status === 'completed' ? '已定稿' : '草稿'})\n`;
       });
     });
     md += `\n---\n\n`;
@@ -85,7 +92,7 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
 
       v.chapters.forEach((c, ci) => {
         md += `<a id="chapter-${vi}-${ci}"></a>\n\n`;
-        md += `## ${c.title}\n\n`;
+        md += `## ${chapterTitleOrDefault(c.title)}\n\n`;
         md += `${c.content || '*(本章暂无正文)*'}\n\n`;
       });
     });
@@ -111,17 +118,20 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${bookTitle}.${ext}`;
+    const fileName = `${bookTitle}.${ext}`;
+    a.download = fileName;
     a.click();
-    URL.revokeObjectURL(url);
+    // 立即释放会让 Safari / Firefox 的下载失败，稍后再释放
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setDownloadedName(fileName);
   };
 
   // 复制到剪贴板
-  const handleCopy = () => {
+  const handleCopy = async () => {
     const content = exportFormat === 'txt' ? generatePureTxt() : generateFullMarkdown();
-    navigator.clipboard.writeText(content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    const ok = await copyText(content);
+    setCopyState(ok ? 'done' : 'failed');
+    setTimeout(() => setCopyState('idle'), ok ? 2000 : 4000);
   };
 
   // 统计字数
@@ -130,18 +140,25 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="export-dialog-title"
+        tabIndex={-1}
+        className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl max-h-[85dvh] overflow-y-auto focus:outline-none"
+      >
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center">
               <FileDown className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-zinc-100">作品全量归档导出</h3>
+              <h3 id="export-dialog-title" className="text-sm font-bold text-zinc-100">作品全量归档导出</h3>
               <p className="text-[11px] text-zinc-400">将多卷分章小说与设定集一键打包落地</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200 text-xs">✕</button>
+          <button onClick={onClose} aria-label="关闭导出" className="text-zinc-400 hover:text-zinc-200 p-1"><X className="w-4 h-4" /></button>
         </div>
 
         {/* 作品统计指标 */}
@@ -203,31 +220,39 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
         </div>
 
         {/* 动作按钮 */}
-        <div className="pt-2 border-t border-zinc-800 flex items-center justify-between">
+        {/* 窄屏放不下时按钮整体换行，按钮文字不折行 */}
+        <div className="pt-2 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2">
           <button
             onClick={handleCopy}
-            className="px-3.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs flex items-center gap-1.5"
+            className="px-3.5 py-1.5 rounded-lg border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs flex items-center gap-1.5 whitespace-nowrap"
           >
-            {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            <span>{copied ? '已复制全书' : '复制全书文本'}</span>
+            {copyState === 'done' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+            <span aria-live="polite" className={copyState === 'failed' ? 'text-rose-300' : undefined}>
+              {copyState === 'done' ? '已复制全书' : copyState === 'failed' ? '复制失败，请手动选中复制' : '复制全书文本'}
+            </span>
           </button>
 
-          <div className="flex gap-2">
+          <div className="flex gap-2 ml-auto">
             <button
               onClick={onClose}
-              className="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:bg-zinc-800"
+              className="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:bg-zinc-800 whitespace-nowrap"
             >
               取消
             </button>
             <button
               onClick={handleDownload}
-              className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 hover:bg-amber-600 text-zinc-950 flex items-center gap-1.5 shadow-md shadow-amber-500/20"
+              className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 hover:bg-amber-600 text-zinc-950 flex items-center gap-1.5 shadow-md shadow-amber-500/20 whitespace-nowrap"
             >
               <FileDown className="w-4 h-4" />
               <span>下载到本地文件</span>
             </button>
           </div>
         </div>
+        {downloadedName && (
+          <p role="status" className="text-[11px] text-emerald-400">
+            已开始下载《{downloadedName}》，可在浏览器下载列表或「下载」文件夹中找到
+          </p>
+        )}
       </div>
     </div>
   );
