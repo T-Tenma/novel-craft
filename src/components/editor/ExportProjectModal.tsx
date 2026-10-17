@@ -31,7 +31,8 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
   const generatePureTxt = () => {
     let text = `《${bookTitle}》\n`;
     if (currentIdea) {
-      text += `题材：${currentIdea.genre}\n简介：${currentIdea.source_skeleton}\n\n`;
+      // source_skeleton 是「借鉴了哪部原作的骨架」的策划笔记，不能当简介写进可投稿的正文
+      text += `题材：${currentIdea.genre}\n\n`;
     }
     volumes.forEach(v => {
       text += `\n====================================\n`;
