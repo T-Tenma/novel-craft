@@ -98,7 +98,27 @@ export interface StoryChapter {
   word_count: number;
   status: 'draft' | 'completed';
   reference_chapter_id?: number;
+  outline?: string; // 章细纲：本章要写的节拍与章末落点，AI 写作按它写、诊断检查有没有写到
+  summary?: ChapterSummary; // AI 生成的本章摘要，后面各章的前情提要用它
 }
+
+// 章节摘要：content_hash 是生成时正文的指纹，正文改过后摘要算过期
+export interface ChapterSummary {
+  text: string;
+  state_changes: string[]; // 会影响后文的变化：人物生死去向、道具归属、数值、伏笔
+  content_hash: string;
+}
+
+// AI 拆出的一章细纲
+export interface ChapterPlan {
+  title: string;
+  outline: string;
+}
+
+// 设定卡更新建议：按名字对上现有的卡就改这几个字段，对不上就新增一张卡
+export type CardUpdateSuggestion =
+  | { target: 'character'; name: string; changes: Partial<Omit<CharacterItem, 'name'>>; reason: string }
+  | { target: 'world'; name: string; changes: Partial<Omit<WorldElement, 'term'>>; reason: string };
 
 export interface StoryVolume {
   id: string;

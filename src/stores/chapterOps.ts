@@ -1,4 +1,4 @@
-import type { StoryChapter, StoryVolume } from '../types';
+import type { ChapterPlan, ChapterSummary, StoryChapter, StoryVolume } from '../types';
 
 export type ChapterWriteMode = 'replace' | 'append';
 
@@ -67,6 +67,55 @@ export function setChapterContent(volumes: StoryVolume[], chapterId: string, con
     ...v,
     chapters: v.chapters.map((c) => (c.id === chapterId ? { ...c, content, word_count: countWords(content) } : c)),
   }));
+}
+
+function updateChapter(volumes: StoryVolume[], chapterId: string, update: (chapter: StoryChapter) => StoryChapter): StoryVolume[] {
+  return volumes.map((v) =>
+    v.chapters.some((c) => c.id === chapterId) ? { ...v, chapters: v.chapters.map((c) => (c.id === chapterId ? update(c) : c)) } : v,
+  );
+}
+
+// 章细纲：按输入原样保存（行尾换行要留着才能接着写），只剩空白时去掉字段
+export function setChapterOutline(volumes: StoryVolume[], chapterId: string, outline: string): StoryVolume[] {
+  return updateChapter(volumes, chapterId, ({ outline: _previous, ...rest }) => (outline.trim() ? { ...rest, outline } : rest));
+}
+
+export function setChapterSummary(volumes: StoryVolume[], chapterId: string, summary: ChapterSummary): StoryVolume[] {
+  return updateChapter(volumes, chapterId, (c) => ({ ...c, summary }));
+}
+
+// 本卷最后一个有正文的章节之后、还没写正文的章节：拆出的细纲依次填进这些章节（原有的细纲被替换），多出来的新建章节
+export function unwrittenTail(chapters: StoryChapter[]): StoryChapter[] {
+  const lastWritten = chapters.map((c) => !!c.content.trim()).lastIndexOf(true);
+  return chapters.slice(lastWritten + 1);
+}
+
+export function applyChapterPlans(
+  volumes: StoryVolume[],
+  volumeId: string,
+  plans: ChapterPlan[],
+  makeId: (index: number) => string,
+): { volumes: StoryVolume[]; firstChapterId: string | null } {
+  const volume = volumes.find((v) => v.id === volumeId);
+  if (!volume || plans.length === 0) return { volumes, firstChapterId: null };
+  const slotIds = unwrittenTail(volume.chapters).map((c) => c.id);
+  const planFor = (chapterId: string) => plans[slotIds.indexOf(chapterId)];
+  const filled = volume.chapters.map((c): StoryChapter => {
+    const plan = slotIds.includes(c.id) ? planFor(c.id) : undefined;
+    if (!plan) return c;
+    const { summary: _stale, ...rest } = c;
+    return { ...rest, title: plan.title, outline: plan.outline };
+  });
+  const added = plans.slice(slotIds.length).map((plan, i): StoryChapter => ({
+    id: makeId(i),
+    title: plan.title,
+    content: '',
+    word_count: 0,
+    status: 'draft',
+    outline: plan.outline,
+  }));
+  const next = volumes.map((v) => (v.id === volumeId ? { ...v, chapters: [...filled, ...added] } : v));
+  return { volumes: next, firstChapterId: slotIds[0] ?? added[0]?.id ?? null };
 }
 
 export interface ActiveDraft {

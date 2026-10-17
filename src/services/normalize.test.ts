@@ -9,6 +9,9 @@ import {
   normalizeParagraphAnalysis,
   normalizeChapterAnalysis,
   normalizeIdeaAssets,
+  normalizeChapterSummary,
+  normalizeChapterPlans,
+  normalizeCardSuggestions,
 } from './normalize.ts';
 
 test('normalizeDiagnosis - keeps real scores (clamped) and requires both of them', () => {
@@ -193,3 +196,58 @@ test('normalizeIdeaAssets - missing characters or settings is an incomplete resu
   assert.equal(normalizeIdeaAssets({ characters: [], world_elements: [{ term: '逆死簿' }] }), null);
   assert.equal(normalizeIdeaAssets('oops'), null);
 });
+
+test('normalizeDiagnosis - outline gaps are a clean list, empty when the model gives none', () => {
+  assert.deepEqual(normalizeDiagnosis({ match_score: 80, tension_score: 7, outline_gaps: ['城门落锁', ' ', 3] })?.outline_gaps, ['城门落锁']);
+  assert.deepEqual(normalizeDiagnosis({ match_score: 80, tension_score: 7 })?.outline_gaps, []);
+});
+
+test('normalizeChapterSummary - needs the summary text; state changes are optional', () => {
+  assert.deepEqual(normalizeChapterSummary({ summary: ' 陈逢青进城。 ', state_changes: ['纸雀归陈逢青', '', 7] }, 'h1'), {
+    text: '陈逢青进城。',
+    state_changes: ['纸雀归陈逢青'],
+    content_hash: 'h1',
+  });
+  assert.deepEqual(normalizeChapterSummary({ summary: '进城' }, 'h')?.state_changes, []);
+  assert.equal(normalizeChapterSummary({ state_changes: ['x'] }, 'h'), null);
+  assert.equal(normalizeChapterSummary('进城', 'h'), null);
+});
+
+test('normalizeChapterPlans - keeps chapters with an outline, numbers untitled ones, joins beat lists', () => {
+  const plans = normalizeChapterPlans(
+    {
+      chapters: [
+        { title: '第四章 进城', outline: '1. 进城\n章末：城门落锁' },
+        { title: '', outline: ['入庙', '对峙'] },
+        { title: '第六章 空的', outline: '' },
+      ],
+    },
+    4,
+  );
+  assert.deepEqual(plans, [
+    { title: '第四章 进城', outline: '1. 进城\n章末：城门落锁' },
+    { title: '第 5 章', outline: '入庙\n对峙' },
+  ]);
+  assert.deepEqual(normalizeChapterPlans([{ title: '甲', outline: '乙' }], 1), [{ title: '甲', outline: '乙' }], 'a bare array works too');
+  assert.equal(normalizeChapterPlans({ chapters: [{ title: '空' }] }, 1), null);
+  assert.equal(normalizeChapterPlans('不是 JSON 对象', 1), null);
+});
+
+test('normalizeCardSuggestions - only known targets and fields, valid enum values, something to change', () => {
+  const list = normalizeCardSuggestions({
+    updates: [
+      { target: 'character', name: '沈管事', changes: { status: '退场/阵亡', name: '改名', mood: '?' }, reason: '第五章身亡' },
+      { target: 'character', name: '小玉', changes: { status: '半死不活' }, reason: '' },
+      { target: 'world', name: '锁心', changes: { description: '已离体', category: '奇物' }, reason: '' },
+      { target: 'item', name: '纸雀', changes: { description: 'x' } },
+      { target: 'world', name: '', changes: { description: 'x' } },
+    ],
+  });
+  assert.deepEqual(list, [
+    { target: 'character', name: '沈管事', changes: { status: '退场/阵亡' }, reason: '第五章身亡' },
+    { target: 'world', name: '锁心', changes: { description: '已离体' }, reason: '' },
+  ]);
+  assert.deepEqual(normalizeCardSuggestions({ updates: [] }), []);
+  assert.equal(normalizeCardSuggestions('抱歉'), null);
+});
+

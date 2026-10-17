@@ -466,7 +466,8 @@ ${styleInstruction}
 2. 调动感官细节（光线、气味、生理刺痛、冷汗），营造强烈的沉浸感与压迫感。
 3. 章末收在让读者想翻下一页的点上（悬念、反转或情绪落点皆可）；按大纲这一章是收束全卷或全书时，把已有矛盾收住，不要为了留悬念再开新局。${storyContext ? `
 4. 这是接续前文的一章：开头要接上前一章结尾，人名、称谓、地名、道具与规则一律沿用【前情与设定】，不要另起炉灶，也不要给人物改名。
-5. 冲突从已有人物和矛盾里来，不要擅自引入设定里没有的新势力、新组织或新的主线谜团。` : ''}
+5. 冲突从已有人物和矛盾里来，不要擅自引入设定里没有的新势力、新组织或新的主线谜团。
+6. 有【本章细纲】时按细纲写这一章：节拍顺序照细纲，章末停在细纲写的落点；参考名作节拍只借鉴节奏与手法，细纲的章末落点优先于节拍里对章末（如「抛出强悬念」）的要求。【下一章细纲】的事留给下一章，本章不要提前写。` : ''}
 直接输出小说正文。`;
 
   const userPrompt = `${storyContext ? `【前情与设定】\n${storyContext}\n\n` : ''}章节标题：${title}\n${ideaContext ? `立项脑洞背景：${ideaContext}\n` : ''}参考的名作结构与节拍：\n${referenceBeat}\n\n请直接输出小说正文：`;
@@ -492,7 +493,8 @@ ${stylePrompt}
 要求：
 1. 保持既有文风与人称，紧接上文最后一句往下写，推进剧情动作，不要突兀转折。
 2. 作者给了续写指令时，这一段严格按指令写。
-3. 人名、称谓、地名、道具与规则以上文和【前情与设定】为准；不要擅自引入设定里没有的新势力、新组织或新的主线谜团，可以在已有矛盾上加压。
+3. 人名、称谓、地名、道具与规则以上文和【前情与设定】为准；不要擅自引入设定里没有的新势力、新组织或新的主线谜团，可以在已有矛盾上加压。${storyContext ? `
+4. 有【本章细纲】时，这一段只写细纲里上文还没写到的下一个节拍，不要一口气把后面的节拍和章末都写完（作者指令点明了具体要写什么时，以指令为准）：一章正文通常 2000-3000 字，每个节拍要用好几段把动作、对白和人物反应展开，不要一句话带过；细纲的节拍都写到了再往章末落点收。【下一章细纲】的事留给下一章，不要提前写。` : ''}
 直接输出续写正文。`;
 
   const userPrompt = `${storyContext ? `【前情与设定】\n${storyContext}\n\n` : ''}当前已有正文：\n${context.slice(-2500)}\n\n作者续写指令：${instruction}`;
@@ -535,12 +537,15 @@ export interface RealtimeDiagnosis {
   hook_detected: boolean;
   pacing_status: '节奏紧凑' | '略有拖沓/说明过多' | '冲突过激';
   instant_feedback: string;
+  outline_gaps: string[]; // 本章细纲里还没写到的节拍；没有细纲时为空
+  checked_outline?: string; // 这次诊断对照的细纲；界面只在它与当前细纲一致时显示细纲结论
 }
 
 export async function diagnoseDraftRealtime(
   config: LLMConfig,
   currentDraft: string,
-  referenceBeat: string
+  referenceBeat: string,
+  chapterOutline = ''
 ): Promise<RealtimeDiagnosis> {
   const systemPrompt = `你是一位小说节奏与黄金开局伴写评审。请快速评估作者当前写出的文本是否符合参考名作的节奏要求。
 严格输出纯 JSON（不加反引号）：
@@ -551,10 +556,12 @@ export async function diagnoseDraftRealtime(
   "pacing_status": "节奏紧凑",
   "instant_feedback": "前200字危机到位，但第3段出现了较长的世界观说明，建议精简并转化为主角的动作观察。"
 }
-判断章末钩子（hook_detected）和断章时，以正文最后一段为准。章末不一定是悬念：最后一段是平静收尾、尾声或情绪落点时，照实评它收得有没有余味，hook_detected 为 false，不要把收尾说成悬念断章，也不要只因没留悬念扣分——收束全卷或全书的一章本就该收住。`;
+判断章末钩子（hook_detected）和断章时，以正文最后一段为准。章末不一定是悬念：最后一段是平静收尾、尾声或情绪落点时，照实评它收得有没有余味，hook_detected 为 false，不要把收尾说成悬念断章，也不要只因没留悬念扣分——收束全卷或全书的一章本就该收住。${chapterOutline.trim() ? `
+作者给了【本章细纲】：另输出 "outline_gaps": ["……"]，逐条简述细纲里正文还没写到的节拍（含章末落点）；都写到了输出空数组。中段省略的部分不要算作没写到。` : ''}`;
 
   const truncated = currentDraft.length > DIAGNOSIS_MAX_CHARS;
-  const userPrompt = `参考的目标节奏与手法：\n${referenceBeat}\n\n作者当前正文（共 ${countChars(currentDraft)} 字${truncated ? '，过长已省略中段，最后一段即章末' : ''}）：\n${excerptHeadTail(currentDraft, DIAGNOSIS_MAX_CHARS)}`;
+  const outlinePart = chapterOutline.trim() ? `【本章细纲】\n${chapterOutline.trim()}\n\n` : '';
+  const userPrompt = `${outlinePart}参考的目标节奏与手法：\n${referenceBeat}\n\n作者当前正文（共 ${countChars(currentDraft)} 字${truncated ? '，过长已省略中段，最后一段即章末' : ''}）：\n${excerptHeadTail(currentDraft, DIAGNOSIS_MAX_CHARS)}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
   let parsed: unknown;
@@ -565,7 +572,7 @@ export async function diagnoseDraftRealtime(
   }
   const diagnosis = normalizeDiagnosis(parsed);
   if (!diagnosis) throw new Error('节奏诊断结果不完整（缺少评分），请重试');
-  return diagnosis;
+  return chapterOutline.trim() ? { ...diagnosis, checked_outline: chapterOutline.trim() } : diagnosis;
 }
 
 export interface AssetMappingResult {

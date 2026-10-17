@@ -24,6 +24,7 @@ test('dropUntouchedDemoVolumes - any change the author made to a demo volume kee
     { ...seed, title: '我的第一卷' },
     { ...seed, description: '我改的主线' },
     { ...seed, chapters: [] },
+    { ...seed, chapters: seed.chapters.map((c, i) => (i === 1 ? { ...c, outline: '我写的细纲' } : c)) },
   ];
   for (const v of variants) assert.deepEqual(dropUntouchedDemoVolumes([v]), [v]);
 });

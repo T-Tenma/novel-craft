@@ -20,6 +20,8 @@ const CHARACTER_STATUSES: CharacterItem['status'][] = ['新登场', '已有角�
 import { ExportProjectModal } from './ExportProjectModal';
 import { ConsistencyReportBanner } from './ConsistencyReportBanner';
 import { VolumeFormModal } from './VolumeFormModal';
+import { ChapterPlanPanel } from './ChapterPlanPanel';
+import { OutlinePlannerModal } from './OutlinePlannerModal';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useScrollHint } from '../../hooks/useScrollHint';
 import { diagnosisFailureNotice } from '../../utils/diagnosisNotice';
@@ -61,7 +63,8 @@ import {
   Feather,
   Menu,
   Undo2,
-  CheckCheck
+  CheckCheck,
+  ListTree
 } from 'lucide-react';
 
 
@@ -135,6 +138,8 @@ export const EditorView: React.FC = () => {
 
   // 🌟 全书导出模态框 🌟
   const [showExportModal, setShowExportModal] = useState(false);
+  // AI 拆细纲弹窗（哪一卷）
+  const [plannerVolumeId, setPlannerVolumeId] = useState<string | null>(null);
   const [saveToast, setSaveToast] = useState(false);
 
   // 🌟 核心新功能：专业主编逐段旁批状态 🌟
@@ -396,7 +401,8 @@ export const EditorView: React.FC = () => {
       const res = await diagnoseDraftRealtime(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         text,
-        referenceBeatText
+        referenceBeatText,
+        findChapter(useNovelStore.getState().volumes, chapterId)?.outline ?? ''
       );
       setDiagnosisResult({ chapterId, data: res });
     } catch (err: any) {
@@ -871,6 +877,14 @@ export const EditorView: React.FC = () => {
                     <Trash2 className="w-3 h-3" />
                   </button>
                   <button
+                    onClick={() => setPlannerVolumeId(vol.id)}
+                    className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-400 text-[10px] flex items-center gap-0.5"
+                    title="按大纲与前情，用 AI 拆出本卷接下来几章的细纲"
+                  >
+                    <ListTree className="w-3 h-3" />
+                    <span>拆细纲</span>
+                  </button>
+                  <button
                     onClick={() => createChapter(vol.id, `第 ${vol.chapters.length + 1} 章`)}
                     className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-400 text-[10px] flex items-center gap-0.5"
                     title="在本卷中新增章节"
@@ -904,7 +918,9 @@ export const EditorView: React.FC = () => {
                           )}
                           <span className="font-medium truncate">{chapterTitleOrDefault(ch.title)}</span>
                         </div>
-                        <span className="text-[10px] text-zinc-500 ml-4 font-mono">{ch.word_count} 字</span>
+                        <span className="text-[10px] text-zinc-500 ml-4 font-mono">
+                          {ch.word_count} 字{ch.outline && !ch.content.trim() && <span className="font-sans text-amber-500/70"> · 有细纲待写</span>}
+                        </span>
                       </div>
 
                       <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -1534,6 +1550,12 @@ export const EditorView: React.FC = () => {
             <div className="flex items-center gap-3 overflow-x-auto text-[11px] whitespace-nowrap">
               <span className="text-zinc-400">吻合度: <strong className={diagnosis.match_score >= 80 ? 'text-emerald-400' : 'text-amber-400'}>{diagnosis.match_score}%</strong></span>
               <span className="text-zinc-400">张力: <strong className="text-amber-400">★{diagnosis.tension_score}</strong></span>
+              {/* 只在这次诊断对照的就是当前细纲时显示：诊断后才写或改过细纲，旧结论不作数 */}
+              {diagnosis.checked_outline && diagnosis.checked_outline === activeChapter?.outline?.trim() && (
+                diagnosis.outline_gaps.length > 0
+                  ? <span className="text-amber-300">细纲未写到：{diagnosis.outline_gaps.join('；')}</span>
+                  : <span className="text-emerald-400">细纲已写到</span>
+              )}
               <span className="text-zinc-300 font-sans border-l border-zinc-800 pl-2">💡 {diagnosis.instant_feedback}</span>
             </div>
             <button onClick={() => setDiagnosisResult(null)} aria-label="关闭诊断结果" className="text-zinc-500 hover:text-zinc-300 text-xs pl-2">✕</button>
@@ -1550,6 +1572,7 @@ export const EditorView: React.FC = () => {
           <div className={`flex-1 overflow-y-auto w-full flex flex-col transition-all duration-300 ${
             isZenMode ? 'p-6 md:p-12 max-w-3xl mx-auto' : 'p-4 md:p-8 max-w-4xl mx-auto'
           }`}>
+            {!isZenMode && activeChapterId && <ChapterPlanPanel key={activeChapterId} chapterId={activeChapterId} />}
             <textarea
               value={draftContent}
               onChange={(e) => setDraftContent(e.target.value)}
@@ -1721,6 +1744,18 @@ export const EditorView: React.FC = () => {
           )}
         </div>
       </main>
+
+      {plannerVolumeId && (
+        <OutlinePlannerModal
+          volumeId={plannerVolumeId}
+          onClose={() => setPlannerVolumeId(null)}
+          onApplied={(count, firstTitle) => {
+            setPlannerVolumeId(null);
+            setShowMobileDrawer(false);
+            showNotice('success', `已写入 ${count} 章细纲，从「${chapterTitleOrDefault(firstTitle)}」开始写`);
+          }}
+        />
+      )}
 
       {/* 新建 / 编辑分卷模态框 */}
       {volumeForm && (

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStoryContext, buildPreviousChapterContext, buildReviewContext, bookVolumes, excerptHeadTail } from './storyContext.ts';
-import type { CharacterItem, StoryVolume, WorldElement } from '../types';
+import { buildStoryContext, buildPreviousChapterContext, buildReviewContext, bookVolumes, excerptHeadTail, recapThrough } from './storyContext.ts';
+import type { CharacterItem, StoryChapter, StoryVolume, WorldElement } from '../types';
+import { hashText } from './chapterSummary.ts';
 
 const chapter = (id: string, title: string, content: string) => ({ id, title, content, word_count: content.length, status: 'draft' as const });
 
@@ -64,7 +65,7 @@ test('buildStoryContext - combines outline, characters, settings, chapter list a
   assert.match(ctx, /陈逢青（男主 \/ 扎彩铺传人）：七日内润色醒神/);
   assert.match(ctx, /沈管事（沈家管事）【已退场\/阵亡】/, 'dead characters are marked so the model does not revive them');
   assert.match(ctx, /《篾骨纸煞谱》（力量体系）：每驱一次纸煞/);
-  assert.match(ctx, /【已写章节】第一章 纸人点睛/);
+  assert.match(ctx, /【前情提要】[^\n]*\n- 第一章 纸人点睛\n/, 'a chapter without a summary is listed by title');
   assert.match(ctx, /门外的手指抠了进来。/);
 });
 
@@ -149,3 +150,90 @@ test('bookVolumes - the volumes of the book a chapter belongs to, without the bo
   assert.deepEqual(bookVolumes(volumes, 'c').map((v) => v.id), ['c1']);
   assert.equal(bookVolumes(volumes, 'missing'), volumes, 'no active chapter: the whole project');
 });
+
+const summarized = (c: StoryChapter, text: string, changes: string[] = []): StoryChapter => ({
+  ...c,
+  summary: { text, state_changes: changes, content_hash: hashText(c.content) },
+});
+
+test('buildStoryContext - the recap gives each earlier chapter its summary and state changes', () => {
+  const volumes: StoryVolume[] = [
+    {
+      id: 'v',
+      title: '卷',
+      description: '',
+      chapters: [
+        summarized(chapter('a', '第一章 夜宴', '甲'.repeat(50)), '陈逢青在寿宴上揭穿换命局。', ['沈管事被纸煞反噬身亡', '纸雀归陈逢青']),
+        chapter('b', '第二章 缝尸', '乙'.repeat(50)),
+        chapter('skip', '第三章 还没写', ''),
+        chapter('now', '第四章 进城', ''),
+      ],
+    },
+  ];
+  const ctx = buildStoryContext({ volumes, chapterId: 'now', characters: [], worldElements: [] });
+  assert.match(ctx, /【前情提要】[^\n]*\n- 第一章 夜宴：陈逢青在寿宴上揭穿换命局。（变化：沈管事被纸煞反噬身亡；纸雀归陈逢青）\n- 第二章 缝尸\n/);
+  assert.doesNotMatch(ctx, /第三章 还没写/, 'an unwritten earlier chapter is not part of the story so far');
+});
+
+test('buildStoryContext - a long book keeps the latest summaries and lists older chapters by title only', () => {
+  const written = Array.from({ length: 40 }, (_, i) => summarized(chapter(`k${i}`, `第${i + 1}章`, `正文${i}`), `摘要${i}：${'事'.repeat(200)}`));
+  const volumes: StoryVolume[] = [{ id: 'v', title: '卷', description: '', chapters: [...written, chapter('now', '第41章', '')] }];
+  const ctx = buildStoryContext({ volumes, chapterId: 'now', characters: [], worldElements: [] });
+  const recap = ctx.slice(ctx.indexOf('【前情提要】'), ctx.indexOf('【前一章'));
+  assert.match(recap, /摘要39：/, 'the latest chapters keep their summaries');
+  assert.doesNotMatch(recap, /摘要0：/);
+  assert.match(recap, /- 第1章\n/, 'older chapters are still listed');
+  assert.ok(recap.length < 3600, `recap is capped (${recap.length})`);
+});
+
+test('buildStoryContext - the chapter outline leads, and the next one is marked as not for this chapter', () => {
+  const volumes: StoryVolume[] = [
+    {
+      id: 'v',
+      title: '卷',
+      description: '',
+      chapters: [
+        chapter('a', '第一章', '正文。'),
+        { ...chapter('b', '第二章', ''), outline: '1. 陈逢青进城\n章末：城门落锁' },
+        { ...chapter('c', '第三章', ''), outline: '城隍庙对峙' },
+      ],
+    },
+  ];
+  const ctx = buildStoryContext({ volumes, chapterId: 'b', characters: [], worldElements: [] });
+  assert.match(ctx, /【本章细纲】[^\n]*\n1\. 陈逢青进城\n章末：城门落锁/);
+  assert.match(ctx, /【下一章细纲】[^\n]*不要[^\n]*\n城隍庙对峙/);
+  const first = buildStoryContext({ volumes, chapterId: 'a', characters: [], worldElements: [] });
+  assert.doesNotMatch(first, /【本章细纲】/);
+  assert.match(first, /【下一章细纲】[\s\S]*陈逢青进城/);
+  assert.doesNotMatch(buildStoryContext({ volumes, chapterId: 'c', characters: [], worldElements: [] }), /【下一章细纲】/);
+});
+
+test('buildReviewContext - carries the chapter outline so missing beats are pointed out', () => {
+  const volumes: StoryVolume[] = [{ ...REVIEW_VOLUMES[0], chapters: [{ ...REVIEW_VOLUMES[0].chapters[0], outline: '沈淮醒来；方执事到场；章末：锁心发烫' }] }];
+  const ctx = buildReviewContext({ volumes, chapterId: 'r1', characters: [], worldElements: [] });
+  assert.match(ctx, /【本章细纲】[^\n]*\n沈淮醒来；方执事到场；章末：锁心发烫/);
+});
+
+test('recapThrough - the recap up to and including this chapter, within this book only', () => {
+  const volumes: StoryVolume[] = [
+    { id: 'old', title: '旧书', description: '', chapters: [summarized(chapter('o', '旧章', '旧'), '旧书的事')] },
+    {
+      id: 'new',
+      title: '新书',
+      description: '',
+      starts_new_book: true,
+      chapters: [summarized(chapter('a', '第一章', '甲'), '甲事'), summarized(chapter('b', '第二章', '乙'), '乙事'), summarized(chapter('c', '第三章', '丙'), '丙事')],
+    },
+  ];
+  const recap = recapThrough(volumes, 'b');
+  assert.match(recap, /- 第一章：甲事\n- 第二章：乙事$/);
+  assert.doesNotMatch(recap, /旧书的事|丙事/);
+});
+
+test('buildStoryContext - a summary written before the chapter was edited is flagged as possibly outdated', () => {
+  const edited = { ...summarized(chapter('a', '第一章', '原稿'), '沈管事身亡。'), content: '改稿：沈管事活了下来。' };
+  const volumes: StoryVolume[] = [{ id: 'v', title: '卷', description: '', chapters: [edited, chapter('now', '第二章', '')] }];
+  const ctx = buildStoryContext({ volumes, chapterId: 'now', characters: [], worldElements: [] });
+  assert.match(ctx, /- 第一章：沈管事身亡。（摘要生成后正文又改过，可能不准）/);
+});
+

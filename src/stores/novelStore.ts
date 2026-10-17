@@ -10,7 +10,10 @@ import {
   StoryChapter,
   TechniquePrompt,
   ParagraphAnalysis,
-  IdeaAssets
+  IdeaAssets,
+  ChapterSummary,
+  ChapterPlan,
+  CardUpdateSuggestion
 } from '../types';
 import { DEFAULT_PROMPT_ARSENAL } from '../data/promptArsenal';
 import { DEMO_VOLUMES, DEMO_CHARACTERS, DEMO_WORLD_ELEMENTS, DEMO_IDEA_ID, INITIAL_CHAPTER_CONTENT } from './demoSeed';
@@ -22,6 +25,9 @@ import {
   setChapterContent,
   restoreChapterAt,
   setChapterReference,
+  setChapterOutline,
+  setChapterSummary,
+  applyChapterPlans,
   removeVolume,
   restoreVolumeAt,
   updateVolumeInfo,
@@ -39,6 +45,7 @@ import {
 import { reportPersistWriteStatus } from './persistStatus';
 import { removeIdea, restoreIdeaAt, withIdeaPrompts, EXAMPLE_SKELETON } from './ideaOps';
 import type { ChapterReview } from '../utils/chapterReview';
+import { applyCardSuggestion } from '../utils/cardUpdates';
 
 export type ActiveTab = 'deconstruct' | 'brainwave' | 'write' | 'review';
 
@@ -123,6 +130,13 @@ export interface NovelState {
   restoreChapter: (volumeId: string, index: number, chapter: StoryChapter) => boolean;
   // 绑定写作章节参考的原著章节；undefined = 跟随拆解页当前选中章节
   setChapterReference: (chapterId: string, referenceId: number | undefined) => void;
+  // 章细纲与章节摘要（前情提要的来源）
+  setChapterOutline: (chapterId: string, outline: string) => void;
+  setChapterSummary: (chapterId: string, summary: ChapterSummary) => void;
+  // AI 拆细纲：填进本卷还没写的章节、不够再新建，并切到第一章细纲所在的章节；返回该章 id
+  applyChapterPlans: (volumeId: string, plans: ChapterPlan[]) => string | null;
+  // 按前情更新设定卡：逐条合并进人物卡与设定卡
+  applyCardSuggestions: (suggestions: CardUpdateSuggestion[]) => void;
 
   // 场景化名家技法 Prompt 武器库
   prompts: TechniquePrompt[];
@@ -388,6 +402,22 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
     set((s) => removeChapter(s.volumes, chapterId, s.activeChapterId)),
   setChapterReference: (chapterId, referenceId) =>
     set((s) => ({ volumes: setChapterReference(s.volumes, chapterId, referenceId) })),
+  setChapterOutline: (chapterId, outline) =>
+    set((s) => ({ volumes: setChapterOutline(s.volumes, chapterId, outline) })),
+  setChapterSummary: (chapterId, summary) =>
+    set((s) => ({ volumes: setChapterSummary(s.volumes, chapterId, summary) })),
+  applyChapterPlans: (volumeId, plans) => {
+    const stamp = Date.now();
+    const result = applyChapterPlans(get().volumes, volumeId, plans, (i) => `chap-${stamp}-${i}`);
+    if (!result.firstChapterId) return null;
+    set({ volumes: result.volumes, ...resolveActiveDraft(result.volumes, result.firstChapterId) });
+    return result.firstChapterId;
+  },
+  applyCardSuggestions: (suggestions) =>
+    set((s) => {
+      const cards = suggestions.reduce(applyCardSuggestion, { characters: s.myCharacters, worldElements: s.myWorldElements });
+      return { myCharacters: cards.characters, myWorldElements: cards.worldElements };
+    }),
   restoreChapter: (volumeId, index, chapter) => {
     const restored = restoreChapterAt(get().volumes, volumeId, index, chapter);
     if (!restored) return false;

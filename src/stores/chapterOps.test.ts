@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { removeChapter, resolveActiveDraft, composeChapterText, setChapterContent, findChapter, locateChapter, restoreChapterAt, resolveReferenceChapterId, setChapterReference, removeVolume, restoreVolumeAt, updateVolumeInfo, chapterTitleOrDefault } from './chapterOps.ts';
+import { removeChapter, resolveActiveDraft, composeChapterText, setChapterContent, findChapter, locateChapter, restoreChapterAt, resolveReferenceChapterId, setChapterReference, removeVolume, restoreVolumeAt, updateVolumeInfo, chapterTitleOrDefault, setChapterOutline, setChapterSummary, applyChapterPlans } from './chapterOps.ts';
 
 test('resolveReferenceChapterId - a chapter bound to a source chapter keeps that reference', () => {
   assert.equal(resolveReferenceChapterId(2, 5, [0, 1, 2, 5]), 2);
@@ -151,3 +151,55 @@ test('chapterTitleOrDefault - a cleared title still shows something in lists and
   assert.equal(chapterTitleOrDefault('  '), '未命名章节');
   assert.equal(chapterTitleOrDefault(''), '未命名章节');
 });
+
+const planVolumes = (): StoryVolume[] => [
+  { id: 'v1', title: '第一卷', description: '', chapters: [{ id: 'a', title: '第一章', content: '写过了', word_count: 3, status: 'completed' }] },
+  {
+    id: 'v2',
+    title: '第二卷',
+    description: '',
+    chapters: [
+      { id: 'b', title: '第二章', content: '写过了', word_count: 3, status: 'draft' },
+      { id: 'c', title: '第 2 章', content: '', word_count: 0, status: 'draft', outline: '旧细纲', summary: { text: '旧', state_changes: [], content_hash: 'x' } },
+      { id: 'd', title: '第 3 章', content: '', word_count: 0, status: 'draft' },
+    ],
+  },
+];
+
+test('setChapterOutline / setChapterSummary - touch only that chapter, clearing removes the field', () => {
+  const volumes = planVolumes();
+  // 输入框每次按键都会写回：行尾的换行要原样保留，否则在末尾按回车换不了行
+  const withOutline = setChapterOutline(volumes, 'b', '进城\n');
+  assert.equal(findChapter(withOutline, 'b')?.outline, '进城\n');
+  assert.equal(findChapter(volumes, 'b')?.outline, undefined, 'the original volumes are not mutated');
+  assert.ok(!('outline' in findChapter(setChapterOutline(withOutline, 'b', '   '), 'b')!), 'an emptied outline is removed');
+  const summary = { text: '摘要', state_changes: ['变化'], content_hash: 'h' };
+  assert.deepEqual(findChapter(setChapterSummary(volumes, 'a', summary), 'a')?.summary, summary);
+  assert.equal(setChapterSummary(volumes, 'a', summary)[1], volumes[1], 'other volumes keep their identity');
+});
+
+test('applyChapterPlans - fills the unwritten chapters after the last written one, then appends', () => {
+  const plans = [
+    { title: '第三章 进城', outline: '一' },
+    { title: '第四章 庙会', outline: '二' },
+    { title: '第五章 对峙', outline: '三' },
+  ];
+  const { volumes, firstChapterId } = applyChapterPlans(planVolumes(), 'v2', plans, (i) => `new-${i}`);
+  const chapters = volumes[1].chapters;
+  assert.deepEqual(chapters.map((c) => [c.id, c.title, c.outline ?? '']), [
+    ['b', '第二章', ''],
+    ['c', '第三章 进城', '一'],
+    ['d', '第四章 庙会', '二'],
+    ['new-0', '第五章 对峙', '三'],
+  ]);
+  assert.equal(chapters[1].summary, undefined, 'a stale summary on a re-planned empty chapter is dropped');
+  assert.deepEqual({ ...chapters[3] }, { id: 'new-0', title: '第五章 对峙', content: '', word_count: 0, status: 'draft', outline: '三' });
+  assert.equal(firstChapterId, 'c');
+  assert.deepEqual(volumes[0], planVolumes()[0], 'other volumes are unchanged');
+});
+
+test('applyChapterPlans - fewer plans than empty chapters leaves the rest alone', () => {
+  const { volumes } = applyChapterPlans(planVolumes(), 'v2', [{ title: '第三章 进城', outline: '一' }], (i) => `new-${i}`);
+  assert.deepEqual(volumes[1].chapters.map((c) => c.title), ['第二章', '第三章 进城', '第 3 章']);
+});
+

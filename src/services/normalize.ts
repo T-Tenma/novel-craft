@@ -1,6 +1,6 @@
 // 大模型 JSON 结果的结构校验：缺字段补安全默认值，关键字段缺失时返回 null 由调用方报错重试，
 // 不编造分数等关键信息。渲染层可以假定这里返回的结构完整。
-import type { BrainwaveIdea, ChapterAnalysis, CharacterItem, DraftParagraphCritique, IdeaAssets, ParagraphAnalysis, ReviewReport, TechniquePrompt, WorldElement } from '../types';
+import type { BrainwaveIdea, CardUpdateSuggestion, ChapterAnalysis, ChapterPlan, ChapterSummary, CharacterItem, DraftParagraphCritique, IdeaAssets, ParagraphAnalysis, ReviewReport, TechniquePrompt, WorldElement } from '../types';
 import type { ConsistencyCheckReport, ConsistencyConflict, RealtimeDiagnosis } from './llm';
 import { IDEA_PROMPT_PREFIX } from '../data/promptArsenal.ts';
 
@@ -72,6 +72,7 @@ export function normalizeDiagnosis(raw: unknown): RealtimeDiagnosis | null {
     // 界面不展示节奏状态；类型要求取值在枚举内
     pacing_status: PACING_STATUSES.find((p) => p === pacing) ?? '节奏紧凑',
     instant_feedback: text(raw.instant_feedback),
+    outline_gaps: textList(raw.outline_gaps),
   };
 }
 
@@ -256,3 +257,59 @@ export function normalizeIdeaAssets(raw: unknown): IdeaAssets | null {
   if (characters.length === 0 || worldElements.length === 0) return null;
   return { characters, world_elements: worldElements, techniques };
 }
+
+// 章节摘要：摘要正文是前情提要的依据，缺了返回 null 由调用方报错重试
+export function normalizeChapterSummary(raw: unknown, contentHash: string): ChapterSummary | null {
+  if (!isObject(raw)) return null;
+  const summary = text(raw.summary);
+  if (!summary) return null;
+  return { text: summary, state_changes: textList(raw.state_changes), content_hash: contentHash };
+}
+
+// AI 拆细纲：没有细纲内容的章节丢弃，没给章名的按编号补；一章都没有时返回 null
+export function normalizeChapterPlans(raw: unknown, startNumber: number): ChapterPlan[] | null {
+  const items = Array.isArray(raw) ? raw.filter(isObject) : isObject(raw) ? objects(raw.chapters) : [];
+  const plans = items
+    .map((item) => ({ title: text(item.title), outline: Array.isArray(item.outline) ? textList(item.outline).join('\n') : text(item.outline) }))
+    .filter((plan) => plan.outline)
+    .map((plan, i) => ({ ...plan, title: plan.title || `第 ${startNumber + i} 章` }));
+  return plans.length > 0 ? plans : null;
+}
+
+const CHARACTER_FIELDS = ['status', 'role', 'key_action', 'inner_motivation'] as const;
+const WORLD_FIELDS = ['category', 'description'] as const;
+
+function cardChanges(raw: unknown, fields: readonly string[]): Record<string, string> {
+  if (!isObject(raw)) return {};
+  return Object.fromEntries(
+    fields
+      .map((field) => [field, text(raw[field])] as const)
+      .filter(([field, value]) => {
+        if (!value) return false;
+        if (field === 'status') return CHARACTER_STATUSES.some((s) => s === value);
+        if (field === 'category') return WORLD_CATEGORIES.some((c) => c === value);
+        return true;
+      }),
+  );
+}
+
+// 设定卡更新建议：只认人物 / 设定两类与已知字段，枚举值不对的字段丢弃，没有可改字段的建议丢弃；
+// 回复不是对象时返回 null（解析失败），空列表表示设定卡已与前情一致
+export function normalizeCardSuggestions(raw: unknown): CardUpdateSuggestion[] | null {
+  if (!isObject(raw)) return null;
+  return objects(raw.updates).flatMap((item): CardUpdateSuggestion[] => {
+    const name = text(item.name);
+    const reason = text(item.reason);
+    if (!name) return [];
+    if (item.target === 'character') {
+      const changes = cardChanges(item.changes, CHARACTER_FIELDS) as Partial<Omit<CharacterItem, 'name'>>;
+      return Object.keys(changes).length > 0 ? [{ target: 'character', name, changes, reason }] : [];
+    }
+    if (item.target === 'world') {
+      const changes = cardChanges(item.changes, WORLD_FIELDS) as Partial<Omit<WorldElement, 'term'>>;
+      return Object.keys(changes).length > 0 ? [{ target: 'world', name, changes, reason }] : [];
+    }
+    return [];
+  });
+}
+

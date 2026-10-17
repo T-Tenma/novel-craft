@@ -2,8 +2,8 @@
 import type { BrainwaveIdea, CharacterItem, StoryVolume, WorldElement } from '../types';
 import { DEMO_CHARACTERS, DEMO_VOLUMES, DEMO_WORLD_ELEMENTS } from './demoSeed.ts';
 
-// 演示卷与种子完全一致（卷名、简介、章节、章名与正文都没动过）才算没改过，移除不会丢东西；作者的任何改动都保留
-const demoFingerprint = (v: StoryVolume) => JSON.stringify([v.title, v.description, v.chapters.map((c) => [c.id, c.title, c.content])]);
+// 演示卷与种子完全一致（卷名、简介、章节、章名、正文与细纲都没动过）才算没改过，移除不会丢东西；作者的任何改动都保留
+const demoFingerprint = (v: StoryVolume) => JSON.stringify([v.title, v.description, v.chapters.map((c) => [c.id, c.title, c.content, c.outline ?? ''])]);
 
 function isUntouchedDemoVolume(volume: StoryVolume): boolean {
   const seed = DEMO_VOLUMES.find((d) => d.id === volume.id);
