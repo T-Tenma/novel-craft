@@ -1,8 +1,10 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNovelStore } from '../../stores/novelStore';
 import { findSelectedIdea, validateBrainwaveInput } from '../../stores/ideaOps';
 import { EditorNotice, UNDO_NOTICE_MS, type EditorNoticeState } from '../editor/EditorNotice';
 import { generateBrainwaveWithLLM } from '../../services/llm';
+import { generateIdeaAssets } from '../../services/ideaAssets';
+import { buildSkeletonFromAnalyses } from '../../utils/skeleton';
 import { NO_API_KEY_MESSAGE, formatActionError } from '../../services/llmErrors';
 import { Sparkles, ArrowRight, Wand2, Compass, Target, List, FileText, Trash2 } from 'lucide-react';
 import type { BrainwaveIdea } from '../../types';
@@ -24,15 +26,26 @@ export const BrainwaveView: React.FC = () => {
     modelName,
     setActiveTab,
     createVolume,
-    createChapter
+    createChapter,
+    brainwaveSkeleton: skeletonInput,
+    setBrainwaveSkeleton: setSkeletonInput,
+    applyIdeaAssets,
+    novel,
+    analyses,
+    globalCharacters,
+    globalWorldElements
   } = useNovelStore();
 
   const [genreInput, setGenreInput] = useState('赛博朋克 + 东方修真克苏鲁');
-  const [skeletonInput, setSkeletonInput] = useState(
-    '参考《诡秘之主》第一卷模式：主角死局重生 ➔ 接触禁忌超自然组织 ➔ 获得带有反噬代价的金手指 ➔ 导师献祭与终局高潮'
-  );
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  // 「采用此大纲」正在生成人物与设定的脑洞，以及它失败时的提示（显示在按钮下方，手机端详情页也看得到）
+  const [adoptingIdeaId, setAdoptingIdeaId] = useState<string | null>(null);
+  const [adoptError, setAdoptError] = useState('');
+  // 切到别的页面会卸载本页：取消进行中的生成，不在作者看不到的地方替换人物卡、新建卷
+  const adoptAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => adoptAbortRef.current?.abort(), []);
+  const analyzedNovelName = novel && Object.keys(analyses).length > 0 ? novel.file_name.replace(/\.[^/.]+$/, '') : null;
   const [notice, setNotice] = useState<EditorNoticeState | null>(null);
   const dismissNotice = useCallback(() => setNotice(null), []);
   // 🌟 手机端视图分段切换: 'generator' (创意生成与列表) | 'detail' (灵感卡片详述) 🌟
@@ -72,13 +85,50 @@ export const BrainwaveView: React.FC = () => {
     }
   };
 
-  // 新建一卷承载这份大纲，不覆盖已有章节；选中该脑洞后，创作台的 AI 生成会带上它的设定
-  const handleUseIdeaForWriting = (idea: typeof currentIdea) => {
+  // 拆解过原著时，把那本书的章节节拍、人物与设定填进骨架
+  const handleFillSkeletonFromAnalyses = () => {
+    if (!novel) return;
+    setSkeletonInput(
+      buildSkeletonFromAnalyses({ fileName: novel.file_name, analyses, characters: globalCharacters, worldElements: globalWorldElements })
+    );
+    setErrorMsg('');
+  };
+
+  // 先按大纲生成人物卡、设定与本书技法（替换演示数据或上一本书的），再新建一卷承载这份大纲，不覆盖已有章节；
+  // 选中该脑洞后，创作台的 AI 生成会带上它的设定
+  const handleUseIdeaForWriting = async (idea: typeof currentIdea) => {
     if (!idea) return;
-    const volumeId = createVolume(`《${idea.title}》第一卷`, buildIdeaOutline(idea));
-    createChapter(volumeId, '第一章');
-    setSelectedIdeaId(idea.id);
-    setActiveTab('write');
+    if (!apiKey) {
+      setAdoptError(NO_API_KEY_MESSAGE);
+      return;
+    }
+    const { myCharacters, myWorldElements } = useNovelStore.getState();
+    if (
+      myCharacters.length + myWorldElements.length > 0 &&
+      !confirm(
+        `采用《${idea.title}》会新建一卷，并由 AI 按这份大纲生成人物卡、设定和本书技法，替换现有的 ${myCharacters.length} 张人物卡、${myWorldElements.length} 条设定。继续吗？`
+      )
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    adoptAbortRef.current = controller;
+    setAdoptingIdeaId(idea.id);
+    setAdoptError('');
+    try {
+      const assets = await generateIdeaAssets({ baseUrl: apiBaseUrl, apiKey, model: modelName }, idea, controller.signal);
+      if (controller.signal.aborted) return;
+      applyIdeaAssets(assets);
+      const volumeId = createVolume(`《${idea.title}》第一卷`, buildIdeaOutline(idea), true);
+      createChapter(volumeId, '第一章');
+      setSelectedIdeaId(idea.id);
+      setActiveTab('write');
+    } catch (err: any) {
+      if (controller.signal.aborted) return;
+      setAdoptError(formatActionError('生成人物与设定', err.message));
+    } finally {
+      setAdoptingIdeaId(null);
+    }
   };
 
   // 与章节 / 分卷一致：删除不弹确认，改为可撤销
@@ -155,7 +205,18 @@ export const BrainwaveView: React.FC = () => {
           </div>
 
           <div>
-            <label htmlFor="brainwave-skeleton" className="block text-[11px] font-medium text-zinc-400 mb-1">迁移的剧情骨架</label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label htmlFor="brainwave-skeleton" className="block text-[11px] font-medium text-zinc-400">迁移的剧情骨架</label>
+              {analyzedNovelName && (
+                <button
+                  onClick={handleFillSkeletonFromAnalyses}
+                  className="text-[11px] text-amber-400 hover:text-amber-300 truncate"
+                  title="用拆解结果（逐章节拍、主要人物、核心设定）替换下面的骨架"
+                >
+                  填入《{analyzedNovelName}》拆解骨架
+                </button>
+              )}
+            </div>
             <textarea
               id="brainwave-skeleton"
               rows={3}
@@ -198,6 +259,7 @@ export const BrainwaveView: React.FC = () => {
                 <button
                   onClick={() => {
                     setSelectedIdeaId(idea.id);
+                    setAdoptError('');
                     if (window.innerWidth < 768) {
                       setMobileTab('detail');
                     }
@@ -241,12 +303,18 @@ export const BrainwaveView: React.FC = () => {
               </div>
               <button
                 onClick={() => handleUseIdeaForWriting(currentIdea)}
-                className="flex items-center justify-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-zinc-950 font-semibold rounded-lg text-xs shadow-lg shadow-amber-500/15 whitespace-nowrap shrink-0"
+                disabled={adoptingIdeaId !== null}
+                className="flex items-center justify-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-zinc-950 font-semibold rounded-lg text-xs shadow-lg shadow-amber-500/15 whitespace-nowrap shrink-0 disabled:opacity-60 disabled:cursor-wait"
               >
-                <span>采用此大纲立即仿写</span>
+                <span>{adoptingIdeaId === currentIdea.id ? '正在生成人物卡、设定与技法…' : '采用此大纲立即仿写'}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </div>
+            {adoptError && (
+              <div role="alert" className="p-3 rounded bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
+                {adoptError}
+              </div>
+            )}
 
             {/* 迁移源骨架 */}
             <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 text-xs space-y-1">

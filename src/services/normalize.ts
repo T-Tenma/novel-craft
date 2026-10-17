@@ -1,7 +1,8 @@
 // 大模型 JSON 结果的结构校验：缺字段补安全默认值，关键字段缺失时返回 null 由调用方报错重试，
 // 不编造分数等关键信息。渲染层可以假定这里返回的结构完整。
-import type { BrainwaveIdea, ChapterAnalysis, CharacterItem, DraftParagraphCritique, ParagraphAnalysis, ReviewReport, WorldElement } from '../types';
+import type { BrainwaveIdea, ChapterAnalysis, CharacterItem, DraftParagraphCritique, IdeaAssets, ParagraphAnalysis, ReviewReport, TechniquePrompt, WorldElement } from '../types';
 import type { ConsistencyCheckReport, ConsistencyConflict, RealtimeDiagnosis } from './llm';
+import { IDEA_PROMPT_PREFIX } from '../data/promptArsenal.ts';
 
 type Loose = Record<string, unknown>;
 
@@ -206,4 +207,52 @@ export function normalizeChapterAnalysis(raw: unknown, chapterTitle: string): Ch
       .map((p, i) => normalizeChapterParagraph(p, i + 1))
       .filter((p): p is ParagraphAnalysis => p !== null),
   };
+}
+
+const TECHNIQUE_LABELS: Record<TechniquePrompt['category'], string> = {
+  atmosphere: '氛围渲染',
+  action: '动作博弈',
+  dialogue: '潜台词对白',
+  psychology: '心理生理',
+  plot_twist: '反转断章',
+};
+const IDEA_ASSET_MAX = 8;
+
+const objects = (v: unknown) => (Array.isArray(v) ? v.filter(isObject) : []);
+const uniqueBy = <T>(items: T[], key: (item: T) => string) => items.filter((item, i) => items.findIndex((x) => key(x) === key(item)) === i);
+
+// 技法类别模型可能给英文 key 也可能给中文标签；都不认识时返回 null
+function techniqueCategory(raw: string): TechniquePrompt['category'] | null {
+  const keys = Object.keys(TECHNIQUE_LABELS) as TechniquePrompt['category'][];
+  return keys.find((k) => k === raw || TECHNIQUE_LABELS[k] === raw) ?? null;
+}
+
+// 「采用此大纲」生成的新书资产：没名字的条目丢弃、同名去重；人物或设定为空时返回 null，调用方报错重试，不能把作者的卡片换成空的
+export function normalizeIdeaAssets(raw: unknown): IdeaAssets | null {
+  if (!isObject(raw)) return null;
+  const characters = uniqueBy(
+    objects(raw.characters).map(normalizeCharacter).filter((c): c is CharacterItem => c !== null),
+    (c) => c.name,
+  ).slice(0, IDEA_ASSET_MAX);
+  const worldElements = uniqueBy(
+    objects(raw.world_elements).map(normalizeWorldElement).filter((w): w is WorldElement => w !== null),
+    (w) => w.term,
+  ).slice(0, IDEA_ASSET_MAX);
+  const techniques: TechniquePrompt[] = objects(raw.techniques)
+    .filter((t) => text(t.name) && text(t.prompt_template))
+    .slice(0, IDEA_ASSET_MAX)
+    .map((t, i) => {
+      // 不认识的类别归入「氛围渲染」，标签保留模型给的写法
+      const category = techniqueCategory(text(t.category));
+      return {
+        id: `${IDEA_PROMPT_PREFIX}${i + 1}`,
+        category: category ?? 'atmosphere',
+        category_label: category ? TECHNIQUE_LABELS[category] : text(t.category) || TECHNIQUE_LABELS.atmosphere,
+        name: text(t.name),
+        description: text(t.description),
+        prompt_template: text(t.prompt_template),
+      };
+    });
+  if (characters.length === 0 || worldElements.length === 0) return null;
+  return { characters, world_elements: worldElements, techniques };
 }

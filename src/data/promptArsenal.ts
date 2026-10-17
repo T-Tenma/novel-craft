@@ -1,5 +1,8 @@
 import type { TechniquePrompt } from '../types';
 
+// 「采用此大纲立即仿写」按脑洞生成的本书技法用这个 id 前缀，再次采用别的脑洞时整批替换
+export const IDEA_PROMPT_PREFIX = 'idea-tech-';
+
 export const DEFAULT_PROMPT_ARSENAL: TechniquePrompt[] = [
   // 1. 氛围渲染 (Atmosphere)
   {
@@ -8,7 +11,7 @@ export const DEFAULT_PROMPT_ARSENAL: TechniquePrompt[] = [
     category_label: '氛围渲染',
     name: '电影级冷开场 (Cold Open)',
     description: '跳过冗长背景说明，第一眼直接聚焦在尸体、致命伤口或倒计时警报上。',
-    prompt_template: '请用冷峻、高密度的镜头语言描写开场环境：调动光影、刺鼻气味（如硝烟或机油）、生理刺痛，严禁倒灌大段世界观说明，直接将主角推进致命险境第一现场。',
+    prompt_template: '请用冷峻、高密度的镜头语言描写开场环境：调动光影、刺鼻气味（如硝烟、血腥或焦糊）、生理刺痛，严禁倒灌大段世界观说明，直接将主角推进致命险境第一现场。',
   },
   {
     id: 'atm-2',
@@ -22,9 +25,9 @@ export const DEFAULT_PROMPT_ARSENAL: TechniquePrompt[] = [
     id: 'atm-3',
     category: 'atmosphere',
     category_label: '氛围渲染',
-    name: '赛博底层市井与霓虹雨夜',
-    description: '高科技与低生活的尖锐反差，破旧铁皮屋与刺目全息广告牌。',
-    prompt_template: '描写底层九龙贫民窟的暴雨夜：腐蚀性酸雨滴在裸露电线上爆出的蓝绿色火花，全息招牌的故障频闪，以及主角破旧义体关节渗出的冰冷机油。',
+    name: '底层市井与雨夜',
+    description: '高处的繁华与底层的破败形成尖锐反差，用本书世界里的具体物件写出潮湿与挣扎。',
+    prompt_template: '描写主角所处底层市井的雨夜：用本书世界观里的具体物件（招牌、灯火、屋舍、器物）写出光影的明灭、潮湿腐朽的气味，以及主角身上的伤痛或负担，衬出高处繁华与底层挣扎的反差。',
   },
 
   // 2. 动作与战斗博弈 (Action)

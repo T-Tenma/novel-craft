@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { generateIdeaAssets } from './ideaAssets.ts';
 import assert from 'node:assert/strict';
 import {
   extractAndParseJson,
@@ -234,4 +235,43 @@ test('critiqueDraftParagraphsWithLLM - rewrites see the story settings and must 
   assert.match(user, /门外的手指抠了进来/);
   assert.match(system, /人名[^。]*数字[^。]*规则[^。]*照原段/);
   assert.match(system, /原段没有的[^。]*不要添/);
+});
+
+test('generateIdeaAssets - builds the new book\'s cards from the adopted outline', async () => {
+  const idea = {
+    id: 'i1', title: '灭门后，我把残宗伪装成隐世禁地', genre: '古风仙侠', source_skeleton: '', golden_finger: '掌教逆死簿：每借一息扣寿三年',
+    main_conflict: '隐匿覆灭真相', three_act_beats: { act1: '祭坛醒来', act2: '剑卫夜袭', act3: '禅让局' },
+  };
+  const reply = JSON.stringify({ characters: [{ name: '沈淮', role: '男主' }], world_elements: [{ term: '逆死簿' }], techniques: [] });
+  const { system, user, result } = await captureRequest(reply, () => generateIdeaAssets(CONFIG, idea));
+  assert.match(user, /灭门后，我把残宗伪装成隐世禁地/);
+  assert.match(user, /掌教逆死簿：每借一息扣寿三年/);
+  assert.match(user, /禅让局/);
+  assert.match(system, /不要出现其他题材的元素/);
+  assert.equal((result as { characters: Array<{ name: string }> }).characters[0].name, '沈淮');
+});
+
+test('generateIdeaAssets - an empty result asks for a retry instead of wiping the cards', async () => {
+  const idea = { id: 'i1', title: 't', genre: 'g', source_skeleton: '', golden_finger: 'x', main_conflict: '', three_act_beats: { act1: '', act2: '', act3: '' } };
+  await assert.rejects(
+    captureRequest(JSON.stringify({ characters: [], world_elements: [] }), () => generateIdeaAssets(CONFIG, idea)),
+    /请重试/,
+  );
+});
+
+test('generateIdeaAssets - leaving the brainwave page cancels the request', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    })) as typeof fetch;
+  try {
+    const controller = new AbortController();
+    const idea = { id: 'i1', title: 't', genre: 'g', source_skeleton: '', golden_finger: 'x', main_conflict: '', three_act_beats: { act1: '', act2: '', act3: '' } };
+    const pending = generateIdeaAssets(CONFIG, idea, controller.signal);
+    controller.abort();
+    await assert.rejects(pending, /取消/, 'cancelled at once, not after the 120s timeout');
+  } finally {
+    globalThis.fetch = original;
+  }
 });

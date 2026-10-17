@@ -10,7 +10,7 @@ const MAX_WORLD_ELEMENTS = 10;
 const ITEM_TEXT_MAX_CHARS = 60;
 const HEAD_SHARE = 0.6; // 截取超长正文时开头占 60%，其余留给结尾（章末钩子）
 
-const clip = (text: string, max: number) => {
+export const clip = (text: string, max: number) => {
   const t = text.trim();
   return t.length > max ? `${t.slice(0, max)}…` : t;
 };
@@ -24,12 +24,18 @@ export function excerptHeadTail(text: string, maxChars: number): string {
   return `${text.slice(0, head)}\n……（中间省略 ${omitted} 字）……\n${text.slice(-tail)}`;
 }
 
-// 全书按卷、章顺序排开的章节列表
-const flattenChapters = (volumes: StoryVolume[]) => volumes.flatMap((v) => v.chapters.map((c) => ({ volume: v, chapter: c })));
+// 当前章所属这本书按卷、章顺序排开的章节列表。项目里可能先后有几本书（演示内容、上一本书），
+// 从当前章所在卷往前找到最近一个「开始一本新书」的卷，之前的卷不算前情；之后手动加的卷仍属于这本书
+function flattenChapters(volumes: StoryVolume[], chapterId: string) {
+  const at = volumes.findIndex((v) => v.chapters.some((c) => c.id === chapterId));
+  let start = Math.max(at, 0);
+  while (start > 0 && !volumes[start].starts_new_book) start -= 1;
+  return volumes.slice(at < 0 ? 0 : start).flatMap((v) => v.chapters.map((c) => ({ volume: v, chapter: c })));
+}
 
 // 当前章之前最近一个有正文的章节（可跨卷）。只给结尾时，前一章前半段发生的事（如道具已离体）模型不知道，防吃设定会误报
 export function buildPreviousChapterContext(volumes: StoryVolume[], chapterId: string): string {
-  const all = flattenChapters(volumes);
+  const all = flattenChapters(volumes, chapterId);
   const at = all.findIndex((x) => x.chapter.id === chapterId);
   const previous = all.slice(0, Math.max(at, 0)).reverse().find((x) => x.chapter.content.trim());
   if (!previous) return '';
@@ -64,7 +70,7 @@ export interface StoryContextInput {
 }
 
 export function buildStoryContext({ volumes, chapterId, characters, worldElements }: StoryContextInput): string {
-  const all = flattenChapters(volumes);
+  const all = flattenChapters(volumes, chapterId);
   const at = all.findIndex((x) => x.chapter.id === chapterId);
   const outline = at >= 0 ? all[at].volume.description.trim() : '';
   const earlierTitles = all.slice(0, Math.max(at, 0)).map((x) => x.chapter.title.trim() || '未命名章节');
@@ -92,7 +98,7 @@ const nameVariants = (name: string) =>
 // 到这一章为止（含本章）的正文里出现过这个名字。设定集是全书的，后文才登场的设定在早先的章节里本来就没有；
 // 找不到章节、或名字拆不出两字以上的写法时一律当作出现过，不加标记
 function appearedBy(volumes: StoryVolume[], chapterId: string): (name: string) => boolean {
-  const all = flattenChapters(volumes);
+  const all = flattenChapters(volumes, chapterId);
   const at = all.findIndex((x) => x.chapter.id === chapterId);
   if (at < 0) return () => true;
   const text = all.slice(0, at + 1).map((x) => x.chapter.content).join('\n');

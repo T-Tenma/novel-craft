@@ -120,3 +120,19 @@ test('buildReviewContext - no settings, no context; an unknown chapter marks not
   const ctx = buildReviewContext({ volumes: REVIEW_VOLUMES, chapterId: 'missing', characters: [], worldElements: REVIEW_WORLD });
   assert.doesNotMatch(ctx, /后文设定/);
 });
+
+test('buildStoryContext - a volume that starts a new book does not inherit the chapters of the book before it', () => {
+  const volumes: StoryVolume[] = [
+    { id: 'demo', title: '演示卷', description: '', chapters: [chapter('d1', '第一章：雨夜与脑机香火', '距化为赛博尸煞还剩 47 小时。')] },
+    { id: 'new', title: '《新书》第一卷', description: '民国志怪', starts_new_book: true, chapters: [chapter('n1', '第一章', '阴钉入颅。')] },
+    { id: 'more', title: '第二卷', description: '', chapters: [chapter('n2', '第二章', '')] },
+  ];
+  const first = buildStoryContext({ volumes, chapterId: 'n1', characters: [], worldElements: [] });
+  assert.doesNotMatch(first, /赛博尸煞|雨夜与脑机香火/);
+  assert.match(first, /民国志怪/);
+  assert.equal(buildPreviousChapterContext(volumes, 'n1'), '');
+  // 之后手动加的卷仍属于这本新书
+  const next = buildStoryContext({ volumes, chapterId: 'n2', characters: [], worldElements: [] });
+  assert.match(next, /阴钉入颅/);
+  assert.doesNotMatch(next, /赛博尸煞/);
+});

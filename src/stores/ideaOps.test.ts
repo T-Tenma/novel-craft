@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { removeIdea, restoreIdeaAt, findSelectedIdea, validateBrainwaveInput } from './ideaOps.ts';
-import type { BrainwaveIdea } from '../types';
+import { removeIdea, restoreIdeaAt, findSelectedIdea, validateBrainwaveInput, withIdeaPrompts } from './ideaOps.ts';
+import type { BrainwaveIdea, TechniquePrompt } from '../types';
 
 const idea = (id: string): BrainwaveIdea => ({
   id,
@@ -43,4 +43,13 @@ test('validateBrainwaveInput - both the target genre and the story skeleton are 
   assert.equal(validateBrainwaveInput('赛博修真', '死局重生 ➔ 获得金手指'), null);
   assert.match(validateBrainwaveInput(' ', '骨架') ?? '', /目标新题材/);
   assert.match(validateBrainwaveInput('题材', '') ?? '', /剧情骨架/);
+});
+
+const technique = (id: string): TechniquePrompt => ({ id, category: 'atmosphere', category_label: '氛围渲染', name: id, description: '', prompt_template: id });
+
+test('withIdeaPrompts - the new book\'s techniques come first and replace those of the previous idea', () => {
+  const current = [technique('idea-tech-1'), technique('idea-tech-2'), technique('custom-1'), technique('atm-1')];
+  const next = withIdeaPrompts(current, [technique('idea-tech-1')]);
+  assert.deepEqual(next.map((p) => p.id), ['idea-tech-1', 'custom-1', 'atm-1']);
+  assert.notEqual(next, current);
 });

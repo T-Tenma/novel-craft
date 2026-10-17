@@ -27,6 +27,7 @@ import { boundTo, type ChapterBound } from '../../utils/chapterBound';
 import { adoptRewrite, shouldRequestCritique, nextCritiqueStart, CRITIQUE_BATCH_SIZE } from '../../utils/critique';
 import { buildStoryContext, buildPreviousChapterContext } from '../../utils/storyContext';
 import { polishLengthWarning } from '../../utils/polishCheck';
+import { IDEA_PROMPT_PREFIX } from '../../data/promptArsenal';
 import { splitParagraphs } from '../../utils/paragraphs';
 import { findSelectedIdea } from '../../stores/ideaOps';
 import { EditorNotice, UNDO_NOTICE_MS, type EditorNoticeState, type EditorNoticeTone } from './EditorNotice';
@@ -1176,7 +1177,7 @@ export const EditorView: React.FC = () => {
       {leftNav === 'prompts' && (
         <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
           <div className="text-[11px] text-zinc-400 leading-relaxed bg-zinc-900 p-2.5 rounded-lg border border-zinc-800">
-            💡 <strong>名家技法 Prompt 武器库</strong>：点击任意卡片，AI 将以该场景手法接续正文。
+            💡 <strong>名家技法 Prompt 武器库</strong>：点击任意卡片，AI 将以该场景手法接续正文。标「本书」的是在脑洞页采用大纲时按这本书生成的。
           </div>
 
           {prompts.map((p) => (
@@ -1186,8 +1187,8 @@ export const EditorView: React.FC = () => {
                   <Zap className="w-3 h-3 text-amber-400" />
                   {p.name}
                 </span>
-                <span className="text-[10px] bg-amber-500/10 text-amber-300 border border-amber-500/20 px-1.5 py-0.5 rounded">
-                  {p.category_label}
+                <span className="text-[10px] bg-amber-500/10 text-amber-300 border border-amber-500/20 px-1.5 py-0.5 rounded shrink-0">
+                  {p.id.startsWith(IDEA_PROMPT_PREFIX) ? `本书 · ${p.category_label}` : p.category_label}
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 leading-relaxed">{p.description}</p>

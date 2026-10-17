@@ -8,6 +8,7 @@ import {
   normalizeConsistencyReport,
   normalizeParagraphAnalysis,
   normalizeChapterAnalysis,
+  normalizeIdeaAssets,
 } from './normalize.ts';
 
 test('normalizeDiagnosis - keeps real scores (clamped) and requires both of them', () => {
@@ -155,4 +156,40 @@ test('normalizeChapterAnalysis - keeps only well-formed characters, settings and
     { term: '廷根', category: '其他', description: '' },
   ]);
   assert.deepEqual(a.paragraph_analyses?.map((p) => [p.index, p.role_type, p.editor_comment]), [[2, '危机转折', ''], [4, '人物动作', '好']]);
+});
+
+test('normalizeIdeaAssets - keeps named entries, fixes categories and gives techniques idea ids and labels', () => {
+  const assets = normalizeIdeaAssets({
+    characters: [
+      { name: ' 沈淮 ', role: '男主', key_action: '醒来', inner_motivation: '护宗' },
+      { name: '沈淮', role: '重复' },
+      { role: '没有名字' },
+    ],
+    world_elements: [
+      { term: '逆死簿', category: '力量体系', description: '每借一息扣寿三年' },
+      { term: '清霄门', category: '宗门', description: '东荒宗门' },
+    ],
+    techniques: [
+      { category: 'atmosphere', name: '废墟祭坛', description: 'd', prompt_template: '写焦土祭坛' },
+      { category: '潜台词对白', name: '虚张声势', description: '', prompt_template: '写一场诈唬' },
+      { category: 'unknown', name: '没有指令' },
+    ],
+  });
+  assert.ok(assets);
+  assert.deepEqual(assets.characters, [{ name: '沈淮', status: '新登场', role: '男主', key_action: '醒来', inner_motivation: '护宗' }]);
+  assert.equal(assets.world_elements[1].category, '其他', 'unknown setting categories fall back to 其他');
+  assert.deepEqual(
+    assets.techniques.map((t) => [t.id, t.category, t.category_label, t.name]),
+    [
+      ['idea-tech-1', 'atmosphere', '氛围渲染', '废墟祭坛'],
+      ['idea-tech-2', 'dialogue', '潜台词对白', '虚张声势'],
+    ],
+  );
+});
+
+test('normalizeIdeaAssets - missing characters or settings is an incomplete result, so the author\'s cards are not half wiped', () => {
+  assert.equal(normalizeIdeaAssets({ characters: [], world_elements: [], techniques: [{ name: 'x', prompt_template: 'y' }] }), null);
+  assert.equal(normalizeIdeaAssets({ characters: [{ name: '沈淮' }], world_elements: [] }), null);
+  assert.equal(normalizeIdeaAssets({ characters: [], world_elements: [{ term: '逆死簿' }] }), null);
+  assert.equal(normalizeIdeaAssets('oops'), null);
 });

@@ -9,7 +9,8 @@ import {
   StoryVolume,
   StoryChapter,
   TechniquePrompt,
-  ParagraphAnalysis
+  ParagraphAnalysis,
+  IdeaAssets
 } from '../types';
 import { DEFAULT_PROMPT_ARSENAL } from '../data/promptArsenal';
 import { FAMOUS_AUTHOR_STYLES, AuthorStyle } from '../data/authorStyles';
@@ -33,7 +34,7 @@ import {
   mergePersistedState,
 } from './persistence';
 import { reportPersistWriteStatus } from './persistStatus';
-import { removeIdea, restoreIdeaAt } from './ideaOps';
+import { removeIdea, restoreIdeaAt, withIdeaPrompts, EXAMPLE_SKELETON } from './ideaOps';
 import type { ChapterReview } from '../utils/chapterReview';
 
 export type ActiveTab = 'deconstruct' | 'brainwave' | 'write' | 'review';
@@ -99,7 +100,8 @@ export interface NovelState {
   volumes: StoryVolume[];
   activeChapterId: string;
   setActiveChapterId: (chapterId: string) => void;
-  createVolume: (title: string, desc?: string) => string;
+  // startsNewBook：这一卷开始一本新书，AI 前情不带之前的卷
+  createVolume: (title: string, desc?: string, startsNewBook?: boolean) => string;
   updateVolume: (volumeId: string, title: string, description: string) => void;
   // 删除整卷（含其中章节）；撤销时用 restoreVolume 放回原位置
   deleteVolume: (volumeId: string) => void;
@@ -141,6 +143,11 @@ export interface NovelState {
   restoreIdea: (index: number, idea: BrainwaveIdea, wasSelected: boolean) => void;
   selectedIdeaId: string | null;
   setSelectedIdeaId: (id: string | null) => void;
+  // 脑洞页「迁移的剧情骨架」输入；拆解页「套用此骨架推演新脑洞」会填入拆解出的骨架（不持久化）
+  brainwaveSkeleton: string;
+  setBrainwaveSkeleton: (skeleton: string) => void;
+  // 采用脑洞大纲时，用生成的人物卡、设定与本书技法替换现有的
+  applyIdeaAssets: (assets: IdeaAssets) => void;
 
   // 仿写草稿兼容字段 (指向当前活动章节)
   draftTitle: string;
@@ -332,7 +339,7 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
     }
   },
 
-  createVolume: (title, desc = '') => {
+  createVolume: (title, desc = '', startsNewBook = false) => {
     const id = `vol-${Date.now()}`;
     set((s) => ({
       volumes: [
@@ -342,6 +349,7 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
           title,
           description: desc,
           chapters: [],
+          ...(startsNewBook ? { starts_new_book: true } : {}),
         },
       ],
     }));
@@ -498,6 +506,14 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
     })),
   selectedIdeaId: 'demo-1',
   setSelectedIdeaId: (id) => set({ selectedIdeaId: id }),
+  brainwaveSkeleton: EXAMPLE_SKELETON,
+  setBrainwaveSkeleton: (skeleton) => set({ brainwaveSkeleton: skeleton }),
+  applyIdeaAssets: (assets) =>
+    set((state) => ({
+      myCharacters: assets.characters,
+      myWorldElements: assets.world_elements,
+      prompts: withIdeaPrompts(state.prompts, assets.techniques),
+    })),
 
   draftTitle: '第一章：雨夜与脑机香火',
   draftContent: INITIAL_CHAPTER_CONTENT,

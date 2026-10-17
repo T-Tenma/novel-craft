@@ -105,6 +105,8 @@ export interface StoryVolume {
   title: string;
   description: string;
   chapters: StoryChapter[];
+  // 这一卷开始一本新书（「采用此大纲」或「作为对照大纲直接仿写」新建的卷）：AI 前情不再带上之前的卷
+  starts_new_book?: boolean;
 }
 
 export interface MyStoryProject {
@@ -115,6 +117,13 @@ export interface MyStoryProject {
 }
 
 // 场景化名家技法 Prompt 武器库
+// 「采用此大纲立即仿写」按脑洞生成的新书人物卡、世界设定与本书技法
+export interface IdeaAssets {
+  characters: CharacterItem[];
+  world_elements: WorldElement[];
+  techniques: TechniquePrompt[];
+}
+
 export interface TechniquePrompt {
   id: string;
   category: 'atmosphere' | 'action' | 'dialogue' | 'psychology' | 'plot_twist';

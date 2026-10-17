@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { copyText } from '../../utils/clipboard';
+import { buildSkeletonFromAnalyses } from '../../utils/skeleton';
 
 interface Props {
   novel: NovelMetadata;
@@ -28,7 +29,7 @@ export const ExportBlueprintModal: React.FC<Props> = ({
   worldElements,
   onClose,
 }) => {
-  const { setActiveTab, setDraftContent, createVolume, createChapter, addIdea, setSelectedIdeaId } = useNovelStore();
+  const { setActiveTab, setDraftContent, createVolume, createChapter, setBrainwaveSkeleton } = useNovelStore();
   const [copyState, setCopyState] = useState<'idle' | 'done' | 'failed'>('idle');
   const dialogRef = useFocusTrap<HTMLDivElement>(true, onClose);
 
@@ -41,10 +42,7 @@ export const ExportBlueprintModal: React.FC<Props> = ({
       ? (analyzedList.reduce((acc, a) => acc + a.tension_score, 0) / analyzedList.length).toFixed(1)
       : '7.5';
 
-  const skeletonSummary = `参考《${novel.file_name.replace(/\.[^/.]+$/, '')}》结构模型：
-1. 开篇钩子：${firstHook}
-2. 推进节奏：平均张力 ${averageTension} 分，采用'事件倒逼行动 ➔ 危机逐步升级 ➔ 触碰世界暗线'递进模式。
-3. 核心机制：角色处于严重信息不对称的被动处境，通过细微线索破局，同时承受设定的负面代价约束。`;
+  const skeletonSummary = buildSkeletonFromAnalyses({ fileName: novel.file_name, analyses, characters, worldElements });
 
   // 2. 生成完整的 Markdown 学习与拆解报告 (可供 Obsidian 导入)
   const generateMarkdown = () => {
@@ -83,23 +81,10 @@ export const ExportBlueprintModal: React.FC<Props> = ({
     return md;
   };
 
-  // 动作 1：一键迁移骨架到【脑洞生成库】
+  // 动作 1：把骨架填进【脑洞生成库】的「迁移的剧情骨架」，作者选好新题材再推演。
+  // 以前直接塞一张写满占位套话的脑洞卡并选中，创作台的 AI 会把那些套话当设定用
   const handleMigrateToBrainwave = () => {
-    const newIdea = {
-      id: `idea-migrated-${Date.now()}`,
-      title: `基于《${novel.file_name.replace(/\.[^/.]+$/, '')}》结构的新书构想`,
-      genre: '可自定义：例如科幻修仙 / 诡异都市 / 末日法则',
-      source_skeleton: skeletonSummary,
-      golden_finger: '参考原著逻辑：必须具有极强破局能力，但使用时伴随不可逆的规则代价',
-      main_conflict: '主角在绝境中求生，对抗庞大而不可直视的既得利益/超自然集团',
-      three_act_beats: {
-        act1: `第一幕：${firstHook}，并在第3章前完成初始金手指觉醒。`,
-        act2: `第二幕：遭遇危机连环升级，假意屈从或加入中立组织，寻找反击缝隙。`,
-        act3: `第三幕：迎来第一卷终局危机，以惨烈代价破茧成蝶。`,
-      },
-    };
-    addIdea(newIdea);
-    setSelectedIdeaId(newIdea.id);
+    setBrainwaveSkeleton(skeletonSummary);
     setActiveTab('brainwave');
     onClose();
   };
@@ -107,7 +92,7 @@ export const ExportBlueprintModal: React.FC<Props> = ({
   // 动作 2：一键载入【仿写创作台】——新建一卷一章承载仿写指引，不覆盖当前正在写的章节
   const handleLoadIntoEditor = () => {
     const bookName = novel.file_name.replace(/\.[^/.]+$/, '');
-    const volumeId = createVolume(`《仿${bookName}节奏》第一卷`, `参考《${bookName}》黄金开篇的仿写练习`);
+    const volumeId = createVolume(`《仿${bookName}节奏》第一卷`, `参考《${bookName}》黄金开篇的仿写练习`, true);
     createChapter(volumeId, '第一章');
     let promptGuide = `【本章仿写指引（参考原著黄金开篇）】\n`;
     promptGuide += `1. 核心目标：前 300 字抛出核心危机，模仿原著开局的悬念手法：“${firstHook}”。\n`;
@@ -163,7 +148,7 @@ export const ExportBlueprintModal: React.FC<Props> = ({
               可跨题材复用
             </span>
           </div>
-          <p className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap font-sans">
+          <p className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap font-sans max-h-64 overflow-y-auto">
             {skeletonSummary}
           </p>
         </div>
@@ -181,7 +166,7 @@ export const ExportBlueprintModal: React.FC<Props> = ({
                 1. 套用此骨架推演新脑洞
               </span>
               <p className="text-[11px] text-zinc-400 leading-relaxed">
-                把这本小说的节奏结构直接套进新题材（如赛博、末日），生成专属新书案。
+                把上面的章节节拍、人物与设定填进脑洞页的「迁移的剧情骨架」，选好新题材即可推演新书大纲。
               </p>
             </div>
             <div className="pt-3 flex items-center gap-1 text-[11px] font-semibold text-amber-400 group-hover:translate-x-1 transition-transform">
