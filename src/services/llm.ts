@@ -2,6 +2,7 @@ import type { ChapterAnalysis, BrainwaveIdea, ReviewReport, ParagraphAnalysis, D
 import type { AuthorStyle } from '../data/authorStyles';
 import { fetchTextWithRetry } from './http.ts';
 import { stripThinking } from './thinking.ts';
+import { routeThroughSiteProxy } from './corsProxy.ts';
 import { describeHttpError, describeNetworkError, isNetworkError } from './llmErrors.ts';
 import {
   normalizeBrainwaveIdea,
@@ -90,12 +91,14 @@ export async function callLLM(
   userPrompt: string,
   options: LLMCallOptions = {}
 ): Promise<string> {
-  const url = buildChatUrl(config.baseUrl);
+  const url = routeThroughSiteProxy(buildChatUrl(config.baseUrl));
 
   let response;
   try {
     response = await fetchTextWithRetry(url, {
       method: 'POST',
+      // 只用 Bearer 鉴权；经本站代理时也不收发 Cookie（否则上游的会话 Cookie 会落到本站域名下）
+      credentials: 'omit',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,
@@ -132,11 +135,12 @@ export async function callLLM(
 
 export async function testLLMConnection(config: LLMConfig): Promise<{ success: boolean; message: string; duration: number }> {
   const startTime = Date.now();
-  const url = buildChatUrl(config.baseUrl);
+  const url = routeThroughSiteProxy(buildChatUrl(config.baseUrl));
 
   try {
     const response = await fetchTextWithRetry(url, {
       method: 'POST',
+      credentials: 'omit',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,

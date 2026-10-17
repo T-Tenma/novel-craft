@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "routes": [
+    {
+      "src": "/llm-proxy/v2ex/chat/v1/(.*)",
+      "dest": "https://edge.v2ex.com/chat/v1/$1",
+      "transforms": [
+        { "type": "request.headers", "op": "delete", "target": { "key": "user-agent" } },
+        { "type": "request.headers", "op": "set", "target": { "key": "user-agent" }, "args": "NovelCraft-LLM-Proxy" }
+      ]
+    }
+  ],
+  "headers": [
+    {
+      "source": "/llm-proxy/:path*",
+      "headers": [{ "key": "x-vercel-enable-rewrite-caching", "value": "0" }]
+    }
+  ]
+}
