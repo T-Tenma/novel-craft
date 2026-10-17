@@ -24,14 +24,21 @@ export function excerptHeadTail(text: string, maxChars: number): string {
   return `${text.slice(0, head)}\n……（中间省略 ${omitted} 字）……\n${text.slice(-tail)}`;
 }
 
-// 当前章所属这本书按卷、章顺序排开的章节列表。项目里可能先后有几本书（演示内容、上一本书），
-// 从当前章所在卷往前找到最近一个「开始一本新书」的卷，之前的卷不算前情；之后手动加的卷仍属于这本书
-function flattenChapters(volumes: StoryVolume[], chapterId: string) {
+// 当前章所属这本书的卷。项目里可能先后有几本书（演示内容、上一本书）：往前到最近一个「开始一本新书」的卷，
+// 往后到下一本书之前；手动加的卷仍属于这本书。找不到章节时返回整个项目
+export function bookVolumes(volumes: StoryVolume[], chapterId: string): StoryVolume[] {
   const at = volumes.findIndex((v) => v.chapters.some((c) => c.id === chapterId));
-  let start = Math.max(at, 0);
+  if (at < 0) return volumes;
+  let start = at;
   while (start > 0 && !volumes[start].starts_new_book) start -= 1;
-  return volumes.slice(at < 0 ? 0 : start).flatMap((v) => v.chapters.map((c) => ({ volume: v, chapter: c })));
+  let end = at + 1;
+  while (end < volumes.length && !volumes[end].starts_new_book) end += 1;
+  return volumes.slice(start, end);
 }
+
+// 这本书按卷、章顺序排开的章节列表；之前的书不算前情
+const flattenChapters = (volumes: StoryVolume[], chapterId: string) =>
+  bookVolumes(volumes, chapterId).flatMap((v) => v.chapters.map((c) => ({ volume: v, chapter: c })));
 
 // 当前章之前最近一个有正文的章节（可跨卷）。只给结尾时，前一章前半段发生的事（如道具已离体）模型不知道，防吃设定会误报
 export function buildPreviousChapterContext(volumes: StoryVolume[], chapterId: string): string {

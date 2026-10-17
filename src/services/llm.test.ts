@@ -275,3 +275,8 @@ test('generateIdeaAssets - leaving the brainwave page cancels the request', asyn
     globalThis.fetch = original;
   }
 });
+
+test('generateInspirationDraft - without a selected idea no cyberpunk background is made up', async () => {
+  const { user } = await captureRequest('初稿', () => generateInspirationDraft(CONFIG, '第一章', '节拍', '', undefined, STORY_CONTEXT));
+  assert.doesNotMatch(user, /赛博|立项脑洞背景/);
+});

@@ -469,7 +469,7 @@ ${styleInstruction}
 5. 冲突从已有人物和矛盾里来，不要擅自引入设定里没有的新势力、新组织或新的主线谜团。` : ''}
 直接输出小说正文。`;
 
-  const userPrompt = `${storyContext ? `【前情与设定】\n${storyContext}\n\n` : ''}章节标题：${title}\n立项脑洞背景：${ideaContext || '赛博修真/现代超自然悬疑'}\n参考的名作结构与节拍：\n${referenceBeat}\n\n请直接输出小说正文：`;
+  const userPrompt = `${storyContext ? `【前情与设定】\n${storyContext}\n\n` : ''}章节标题：${title}\n${ideaContext ? `立项脑洞背景：${ideaContext}\n` : ''}参考的名作结构与节拍：\n${referenceBeat}\n\n请直接输出小说正文：`;
 
   // 正文类输出会直接写进章节，推理模型的思考过程必须去掉
   return stripThinking(await callLLM(config, systemPrompt, userPrompt));

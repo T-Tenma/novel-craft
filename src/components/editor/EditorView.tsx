@@ -509,11 +509,15 @@ export const EditorView: React.FC = () => {
       showNotice('info', '原著尚未拆解出角色或世界观，请先在「研习拆解坊」拆解几章原著');
       return;
     }
+    if (!currentIdea) {
+      showNotice('info', '映射需要知道新书的题材：请先在「脑洞生成库」选中或采用一份大纲');
+      return;
+    }
 
     setIsMapping(true);
     try {
-      const targetGenre = currentIdea ? currentIdea.genre : '赛博道门修真';
-      const targetIdeaDesc = currentIdea ? `${currentIdea.title}：${currentIdea.golden_finger}` : '底层散修脑机觉醒';
+      const targetGenre = currentIdea.genre;
+      const targetIdeaDesc = `${currentIdea.title}：${currentIdea.golden_finger}`;
 
       const mapped = await mapAssetsToNewStory(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },

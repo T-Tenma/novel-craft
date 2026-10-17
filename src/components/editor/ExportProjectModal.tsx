@@ -11,6 +11,7 @@ import { copyText } from '../../utils/clipboard';
 import { chapterTitleOrDefault } from '../../stores/chapterOps';
 import React, { useState } from 'react';
 import { useNovelStore } from '../../stores/novelStore';
+import { bookVolumes } from '../../utils/storyContext';
 
 interface Props {
   onClose: () => void;
@@ -18,7 +19,10 @@ interface Props {
 
 export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
   const dialogRef = useFocusTrap<HTMLDivElement>(true, onClose);
-  const { volumes, myCharacters, myWorldElements, draftTitle, ideas, selectedIdeaId } = useNovelStore();
+  const { volumes: allVolumes, activeChapterId, myCharacters, myWorldElements, draftTitle, ideas, selectedIdeaId } = useNovelStore();
+  // 只导出当前这本书：项目里可能还有上一本书或演示卷
+  const volumes = bookVolumes(allVolumes, activeChapterId);
+  const otherVolumeCount = allVolumes.length - volumes.length;
   const [exportFormat, setExportFormat] = useState<'markdown' | 'txt'>('markdown');
   const [copyState, setCopyState] = useState<'idle' | 'done' | 'failed'>('idle');
   // 下载触发后提示文件名；浏览器不会回报是否保存成功，只能告知去哪里找
@@ -179,6 +183,12 @@ export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
             <span className="font-mono text-emerald-400 font-bold">{totalWords.toLocaleString()} 字</span>
           </div>
         </div>
+
+        {otherVolumeCount > 0 && (
+          <p className="text-[11px] text-zinc-500 leading-relaxed">
+            只导出当前这本书（{volumes.length} 卷）；项目里另有 {otherVolumeCount} 卷属于其他书，切到那本书的章节再导出。
+          </p>
+        )}
 
         {/* 格式选择 */}
         <div className="space-y-2 text-xs">

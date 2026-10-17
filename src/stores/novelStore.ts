@@ -13,6 +13,7 @@ import {
   IdeaAssets
 } from '../types';
 import { DEFAULT_PROMPT_ARSENAL } from '../data/promptArsenal';
+import { DEMO_VOLUMES, DEMO_CHARACTERS, DEMO_WORLD_ELEMENTS, DEMO_IDEA_ID, INITIAL_CHAPTER_CONTENT } from './demoSeed';
 import { FAMOUS_AUTHOR_STYLES, AuthorStyle } from '../data/authorStyles';
 import {
   removeChapter,
@@ -24,8 +25,10 @@ import {
   removeVolume,
   restoreVolumeAt,
   updateVolumeInfo,
+  resolveActiveDraft,
   type ChapterWriteMode,
 } from './chapterOps';
+import { dropUntouchedDemoCards, dropUntouchedDemoVolumes, hasDemoVolume } from './bookOps';
 import {
   PERSIST_STORAGE_KEY,
   PERSIST_VERSION,
@@ -168,17 +171,6 @@ export interface NovelState {
   setApiConfig: (baseUrl: string, key: string, model: string) => void;
 }
 
-const INITIAL_CHAPTER_CONTENT = `暴雨冲刷着九龙霓虹闪烁的仿生飞檐。
-
-林宵抬起手，后颈的神经接口还在渗出带着机油味的淡银色冷却液。
-在他面前破旧的铁皮工作台上，摆放着一台被熔断的义体烙铁，以及一枚冒着蓝绿色电弧的“铜钱”。
-
-那不是普通的铜钱，铜钱的正反两面，用激光蚀刻着密集如电路板的道教《太上感应篇》符文。
-
-“自杀？还是被算力贷公司灭口？”
-林宵揉着剧痛的眉心，调出了视网膜前的系统界面。一行血红色的警报正在不断闪烁：
-【警告：脑机神经熵值已达 89%，距化为‘赛博尸煞’还剩 47 小时】`;
-
 const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]> = (set, get) => ({
   activeTab: 'deconstruct',
   setActiveTab: (tab) => set({ activeTab: tab }),
@@ -232,22 +224,7 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
     set({ globalCharacters: characters, globalWorldElements: worldElements }),
 
   // 我的新书人物资产
-  myCharacters: [
-    {
-      name: '林宵',
-      role: '男主角 / 贫民窟脑机散修',
-      status: '新登场',
-      key_action: '在脑机过载濒死时苏醒，发现体内寄生上古道经铜钱',
-      inner_motivation: '在47小时脑机熵值化煞倒计时前活下去，查明前身死因'
-    },
-    {
-      name: '玄通老道',
-      role: '引路人 / 暗网黑市义体改造医修',
-      status: '已有角色',
-      key_action: '为主角提供初始抑制剂，私下推销走私道门符文芯片',
-      inner_motivation: '寻求传说中的飞升算力核心，但自身义体已严重老化'
-    }
-  ],
+  myCharacters: DEMO_CHARACTERS,
   setMyCharacters: (chars) => set({ myCharacters: chars }),
   addMyCharacter: (char) => set((s) => ({ myCharacters: [...s.myCharacters, char] })),
   updateMyCharacter: (idx, char) =>
@@ -260,18 +237,7 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
     set((s) => ({ myCharacters: s.myCharacters.filter((_, i) => i !== idx) })),
 
   // 我的新书世界观资产
-  myWorldElements: [
-    {
-      term: '太上感应铜钱',
-      category: '力量体系',
-      description: '激光蚀刻道教符文的量子运算核心，每次运转扣除人类情感算力值。'
-    },
-    {
-      term: '九龙贫民窟·下层网络',
-      category: '地理背景',
-      description: '排污管道与高压光纤交织的无序地下城，被算力贷压垮的修士在此沦为赛博厉鬼。'
-    }
-  ],
+  myWorldElements: DEMO_WORLD_ELEMENTS,
   setMyWorldElements: (elements) => set({ myWorldElements: elements }),
   addMyWorldElement: (el) => set((s) => ({ myWorldElements: [...s.myWorldElements, el] })),
   updateMyWorldElement: (idx, el) =>
@@ -284,45 +250,7 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
     set((s) => ({ myWorldElements: s.myWorldElements.filter((_, i) => i !== idx) })),
 
   // 多卷多章树状项目管理
-  volumes: [
-    {
-      id: 'vol-1',
-      title: '第一卷：数据道经与九龙夜雨',
-      description: '主角在死局重生，破除算力贷灭口危机，初探暗网与宗门芯片',
-      chapters: [
-        {
-          id: 'chap-1',
-          title: '第一章：雨夜与脑机香火',
-          content: INITIAL_CHAPTER_CONTENT,
-          word_count: INITIAL_CHAPTER_CONTENT.replace(/\s+/g, '').length,
-          status: 'draft',
-          reference_chapter_id: 1,
-        },
-        {
-          id: 'chap-2',
-          title: '第二章：黑网追凶与玄通道人',
-          content: '',
-          word_count: 0,
-          status: 'draft',
-          reference_chapter_id: 2,
-        },
-      ],
-    },
-    {
-      id: 'vol-2',
-      title: '第二卷：财阀长生殿与赛博天劫',
-      description: '进入大都市上层，接触长生财阀的核心机密',
-      chapters: [
-        {
-          id: 'chap-3',
-          title: '第一章：飞升许可证',
-          content: '',
-          word_count: 0,
-          status: 'draft',
-        },
-      ],
-    },
-  ],
+  volumes: DEMO_VOLUMES,
   activeChapterId: 'chap-1',
   setActiveChapterId: (chapterId) => {
     const state = get();
@@ -341,18 +269,24 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
 
   createVolume: (title, desc = '', startsNewBook = false) => {
     const id = `vol-${Date.now()}`;
-    set((s) => ({
-      volumes: [
-        ...s.volumes,
-        {
-          id,
-          title,
-          description: desc,
-          chapters: [],
-          ...(startsNewBook ? { starts_new_book: true } : {}),
-        },
-      ],
-    }));
+    const volume: StoryVolume = { id, title, description: desc, chapters: [], ...(startsNewBook ? { starts_new_book: true } : {}) };
+    set((s) => {
+      if (!startsNewBook) return { volumes: [...s.volumes, volume] };
+      // 开始一本新书：没改过的演示卷一并移除；活动章节若在其中，草稿跟着换到还在的章节。
+      // 演示卷都不在了，再移除没改过的演示人物卡与设定（作者改过演示卷、还在用那个世界时保留）
+      const volumes = [...dropUntouchedDemoVolumes(s.volumes), volume];
+      const draft = resolveActiveDraft(volumes, s.activeChapterId);
+      if (hasDemoVolume(volumes)) return { volumes, ...draft };
+      const cards = dropUntouchedDemoCards(s.myCharacters, s.myWorldElements);
+      return {
+        volumes,
+        ...draft,
+        myCharacters: cards.characters,
+        myWorldElements: cards.worldElements,
+        // 新书不沿用默认选中的演示脑洞；采用大纲时随后会选中新脑洞
+        selectedIdeaId: s.selectedIdeaId === DEMO_IDEA_ID ? null : s.selectedIdeaId,
+      };
+    });
     return id;
   },
   updateVolume: (volumeId, title, description) =>
@@ -484,7 +418,7 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
 
   ideas: [
     {
-      id: 'demo-1',
+      id: DEMO_IDEA_ID,
       title: '赛博道门：数据飞升者',
       genre: '赛博朋克 + 东方古典克苏鲁',
       source_skeleton: '仿《诡秘之主》第一卷：死而复生破局 ➔ 窥见高维网络污染 ➔ 序列芯片植入',
@@ -504,7 +438,7 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
       ideas: restoreIdeaAt(state.ideas, index, idea),
       ...(wasSelected ? { selectedIdeaId: idea.id } : {}),
     })),
-  selectedIdeaId: 'demo-1',
+  selectedIdeaId: DEMO_IDEA_ID,
   setSelectedIdeaId: (id) => set({ selectedIdeaId: id }),
   brainwaveSkeleton: EXAMPLE_SKELETON,
   setBrainwaveSkeleton: (skeleton) => set({ brainwaveSkeleton: skeleton }),

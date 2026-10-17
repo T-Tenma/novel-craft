@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStoryContext, buildPreviousChapterContext, buildReviewContext, excerptHeadTail } from './storyContext.ts';
+import { buildStoryContext, buildPreviousChapterContext, buildReviewContext, bookVolumes, excerptHeadTail } from './storyContext.ts';
 import type { CharacterItem, StoryVolume, WorldElement } from '../types';
 
 const chapter = (id: string, title: string, content: string) => ({ id, title, content, word_count: content.length, status: 'draft' as const });
@@ -135,4 +135,17 @@ test('buildStoryContext - a volume that starts a new book does not inherit the c
   const next = buildStoryContext({ volumes, chapterId: 'n2', characters: [], worldElements: [] });
   assert.match(next, /阴钉入颅/);
   assert.doesNotMatch(next, /赛博尸煞/);
+});
+
+test('bookVolumes - the volumes of the book a chapter belongs to, without the books before or after it', () => {
+  const volumes: StoryVolume[] = [
+    { id: 'a1', title: 'A 卷一', description: '', chapters: [chapter('a', '甲', '')] },
+    { id: 'b1', title: 'B 卷一', description: '', starts_new_book: true, chapters: [chapter('b', '乙', '')] },
+    { id: 'b2', title: 'B 卷二', description: '', chapters: [chapter('b2c', '丙', '')] },
+    { id: 'c1', title: 'C 卷一', description: '', starts_new_book: true, chapters: [chapter('c', '丁', '')] },
+  ];
+  assert.deepEqual(bookVolumes(volumes, 'b2c').map((v) => v.id), ['b1', 'b2']);
+  assert.deepEqual(bookVolumes(volumes, 'a').map((v) => v.id), ['a1']);
+  assert.deepEqual(bookVolumes(volumes, 'c').map((v) => v.id), ['c1']);
+  assert.equal(bookVolumes(volumes, 'missing'), volumes, 'no active chapter: the whole project');
 });
