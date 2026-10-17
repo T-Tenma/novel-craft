@@ -21,6 +21,7 @@ import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useScrollHint } from '../../hooks/useScrollHint';
 import { diagnosisFailureNotice } from '../../utils/diagnosisNotice';
 import { boundTo, type ChapterBound } from '../../utils/chapterBound';
+import { adoptRewrite, shouldRequestCritique } from '../../utils/critique';
 import { findSelectedIdea } from '../../stores/ideaOps';
 import { EditorNotice, UNDO_NOTICE_MS, type EditorNoticeState, type EditorNoticeTone } from './EditorNotice';
 import { NO_API_KEY_MESSAGE, formatActionError } from '../../services/llmErrors';
@@ -131,6 +132,8 @@ export const EditorView: React.FC = () => {
   // 🌟 核心新功能：专业主编逐段旁批状态 🌟
   const [showCritiqueDrawer, setShowCritiqueDrawer] = useState(false);
   const [critiqueResult, setCritiqueResult] = useState<ChapterBound<DraftParagraphCritique[]> | null>(null);
+  // 已采纳改写的批注（按段落序号），随新一轮批注清空；已采纳的不能再点，避免重复追加
+  const [adoptedCritiques, setAdoptedCritiques] = useState<number[]>([]);
   const [isCritiquing, setIsCritiquing] = useState(false);
 
   // AI 操作加载状态：改写正文的操作共用一个任务槽（ref 防止同一帧内重复触发）
@@ -367,6 +370,12 @@ export const EditorView: React.FC = () => {
   };
 
   // 5. 核心：主编逐段旁批与精修建议 (结合名家文风审查)
+  // 工具栏按钮：本章已有批注时先重新打开抽屉，不重新请求（抽屉开着时才重新批注）
+  const handleCritiqueButton = () => {
+    if (shouldRequestCritique(critiqueList.length > 0, showCritiqueDrawer)) handleRunParagraphCritique();
+    else setShowCritiqueDrawer(true);
+  };
+
   const handleRunParagraphCritique = async () => {
     if (!draftContent.trim()) {
       showNotice('info', '请先输入正文');
@@ -379,6 +388,7 @@ export const EditorView: React.FC = () => {
     const chapterId = activeChapterId;
     setIsCritiquing(true);
     setCritiqueResult(null);
+    setAdoptedCritiques([]);
     setShowCritiqueDrawer(true);
     try {
       const results = await critiqueDraftParagraphsWithLLM(
@@ -403,17 +413,17 @@ export const EditorView: React.FC = () => {
     return true;
   };
 
-  const handleAdoptRewrite = (originalSnippet: string, suggestion: string) => {
+  const handleAdoptRewrite = (item: DraftParagraphCritique) => {
+    const suggestion = item.rewrite_suggestion;
     if (!suggestion || blockWhileWritingCurrentChapter()) return;
-    const paras = draftContent.split(/\n+/);
-    const targetIdx = paras.findIndex(p => p.includes(originalSnippet.slice(0, 15)));
-    if (targetIdx >= 0) {
-      paras[targetIdx] = suggestion;
-      setDraftContent(paras.join('\n\n'));
+    const result = adoptRewrite(draftContent, item.paragraph_text, suggestion);
+    setDraftContent(result.content);
+    setAdoptedCritiques(prev => [...prev, item.index]);
+    if (result.appended) {
+      showNotice('info', `没找到第 ${item.index} 段的原文（可能已改动），示范改写已追加到本章末尾`);
+    } else {
       setSaveToast(true);
       setTimeout(() => setSaveToast(false), 1500);
-    } else {
-      setDraftContent(draftContent + '\n\n' + suggestion);
     }
   };
 
@@ -1323,7 +1333,7 @@ export const EditorView: React.FC = () => {
 
             {/* 逐段主编旁批 */}
             <button
-              onClick={handleRunParagraphCritique}
+              onClick={handleCritiqueButton}
               disabled={isCritiquing}
               className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs border transition-all shrink-0 ${
                 showCritiqueDrawer 
@@ -1466,7 +1476,14 @@ export const EditorView: React.FC = () => {
                   <MessageSquareCode className="w-4 h-4 text-amber-400" />
                   <span className="text-xs font-semibold text-zinc-200">白金主编逐段批注与改写</span>
                 </div>
-                <button onClick={() => setShowCritiqueDrawer(false)} aria-label="关闭主编旁批" className="text-zinc-500 hover:text-zinc-300 text-xs p-1">✕</button>
+                <div className="flex items-center gap-1">
+                  {critiqueList.length > 0 && !isCritiquing && (
+                    <button onClick={handleRunParagraphCritique} className="text-[11px] text-zinc-400 hover:text-amber-300 px-2 py-1 rounded whitespace-nowrap">
+                      重新批注
+                    </button>
+                  )}
+                  <button onClick={() => setShowCritiqueDrawer(false)} aria-label="关闭主编旁批" className="text-zinc-500 hover:text-zinc-300 text-xs p-1">✕</button>
+                </div>
               </div>
 
               <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
@@ -1504,20 +1521,23 @@ export const EditorView: React.FC = () => {
                             {item.rewrite_suggestion}
                           </p>
                           <div className="pt-1 flex justify-end">
-                            <button
-                              onClick={() => {
-                                handleAdoptRewrite(item.paragraph_text, item.rewrite_suggestion!);
-                                if (window.innerWidth < 768) {
-                                  setShowCritiqueDrawer(false);
-                                }
-                              }}
-                              disabled={isWritingCurrentChapter}
-                              title={isWritingCurrentChapter ? aiWriteBusyTitle : undefined}
-                              className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500/20 disabled:hover:text-amber-300"
-                            >
-                              <Check className="w-3 h-3" />
-                              <span>采纳改写</span>
-                            </button>
+                            {/* 采纳后抽屉保持打开（手机端也是），其余批注可以接着看；关掉抽屉看正文，再点「主编旁批」即可回来 */}
+                            {adoptedCritiques.includes(item.index) ? (
+                              <span className="px-2.5 py-1 text-emerald-400 text-[10px] font-semibold flex items-center gap-1">
+                                <Check className="w-3 h-3" />
+                                <span>已采纳</span>
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleAdoptRewrite(item)}
+                                disabled={isWritingCurrentChapter}
+                                title={isWritingCurrentChapter ? aiWriteBusyTitle : undefined}
+                                className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500/20 disabled:hover:text-amber-300"
+                              >
+                                <Check className="w-3 h-3" />
+                                <span>采纳改写</span>
+                              </button>
+                            )}
                           </div>
                         </div>
                       )}
