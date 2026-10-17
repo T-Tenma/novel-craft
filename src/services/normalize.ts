@@ -120,12 +120,15 @@ export function normalizeParagraphAnalysis(raw: unknown, paragraphText: string):
   };
 }
 
+// 模型常照抄示例在改写前加「改写示范：」，采纳时会原样写进正文
+const REWRITE_LABEL = /^【?(?:改写示范|示范改写|改写建议|精修改写)】?\s*[：:]\s*/;
+
 export function normalizeParagraphCritique(raw: unknown, fallbackIndex: number): DraftParagraphCritique | null {
   if (!isObject(raw)) return null;
   const paragraph_text = text(raw.paragraph_text);
   const editor_comment = text(raw.editor_comment);
   if (!paragraph_text && !editor_comment) return null;
-  const rewrite = text(raw.rewrite_suggestion);
+  const rewrite = text(raw.rewrite_suggestion).replace(REWRITE_LABEL, '').trim();
   return {
     index: typeof raw.index === 'number' ? raw.index : fallbackIndex,
     paragraph_text,

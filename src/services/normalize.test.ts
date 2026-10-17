@@ -102,6 +102,15 @@ test('normalizeParagraphCritique - missing grade no longer crashes the drawer', 
   assert.equal(item.rewrite_suggestion, '改写');
 });
 
+test('normalizeParagraphCritique - strips a leading label so adopting writes only the rewrite into the chapter', () => {
+  const rewrite = (s: string) => normalizeParagraphCritique({ paragraph_text: '雨夜', editor_comment: '套话', rewrite_suggestion: s }, 1)?.rewrite_suggestion;
+  assert.equal(rewrite('改写示范：油灯摇曳的暗影下，那对肢体违背常理。'), '油灯摇曳的暗影下，那对肢体违背常理。');
+  assert.equal(rewrite('示范改写: 雨停了。'), '雨停了。');
+  assert.equal(rewrite('【改写建议】：雨停了。'), '雨停了。');
+  assert.equal(rewrite('他说：雨停了。'), '他说：雨停了。', 'dialogue colons in the prose stay');
+  assert.equal(rewrite('改写示范：'), undefined, 'a bare label is no rewrite');
+});
+
 test('normalizeParagraphCritique - drops empty or malformed items', () => {
   assert.equal(normalizeParagraphCritique({ grade: '优秀' }, 1), null);
   assert.equal(normalizeParagraphCritique(undefined, 1), null);
