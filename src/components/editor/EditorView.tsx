@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useNovelStore } from '../../stores/novelStore';
+import { useNovelStore, type AiEdit } from '../../stores/novelStore';
 import { findChapter, locateChapter, resolveReferenceChapterId, chapterTitleOrDefault, type ChapterWriteMode } from '../../stores/chapterOps';
 import { appendUniqueBy, validateUniqueName, insertAt, DEFAULT_NAME_MAX_LENGTH } from '../../utils/collections';
 import { 
@@ -24,7 +24,7 @@ import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useScrollHint } from '../../hooks/useScrollHint';
 import { diagnosisFailureNotice } from '../../utils/diagnosisNotice';
 import { boundTo, type ChapterBound } from '../../utils/chapterBound';
-import { adoptRewrite, shouldRequestCritique, nextCritiqueStart, CRITIQUE_BATCH_SIZE } from '../../utils/critique';
+import { adoptRewrite, adoptAllRewrites, pendingRewrites, shouldRequestCritique, nextCritiqueStart, CRITIQUE_BATCH_SIZE } from '../../utils/critique';
 import { buildStoryContext, buildPreviousChapterContext } from '../../utils/storyContext';
 import { polishLengthWarning } from '../../utils/polishCheck';
 import { IDEA_PROMPT_PREFIX } from '../../data/promptArsenal';
@@ -60,7 +60,8 @@ import {
   Check,
   Feather,
   Menu,
-  Undo2
+  Undo2,
+  CheckCheck
 } from 'lucide-react';
 
 
@@ -141,6 +142,8 @@ export const EditorView: React.FC = () => {
   const [critiqueResult, setCritiqueResult] = useState<ChapterBound<DraftParagraphCritique[]> | null>(null);
   // 已采纳改写的批注（按段落序号），随新一轮批注清空；已采纳的不能再点，避免重复追加
   const [adoptedCritiques, setAdoptedCritiques] = useState<number[]>([]);
+  // 一键采纳写入的那次 AI 编辑、它采纳的段号与它给出的提示：撤销这次编辑时把这些批注恢复成可采纳，并收起这条提示
+  const bulkAdoptRef = useRef<{ edit: AiEdit | null; indexes: number[]; notice: string } | null>(null);
   const [isCritiquing, setIsCritiquing] = useState(false);
   // 续写方向：作者指定下一段写什么，续写成功后清空
   const [expandDirection, setExpandDirection] = useState('');
@@ -181,6 +184,7 @@ export const EditorView: React.FC = () => {
   const critiqueList = boundTo(critiqueResult, activeChapterId) ?? [];
   const critiqueParagraphCount = splitParagraphs(draftContent).length;
   const nextCritiqueFrom = critiqueList.length > 0 ? nextCritiqueStart(critiqueParagraphCount, critiqueList) : null;
+  const pendingCritiques = pendingRewrites(critiqueList, adoptedCritiques);
 
   // 编辑角色的局部表单状态
   const [editingCharIdx, setEditingCharIdx] = useState<number | null>(null);
@@ -428,6 +432,7 @@ export const EditorView: React.FC = () => {
     if (startParagraph === 0) {
       setCritiqueResult(null);
       setAdoptedCritiques([]);
+      bulkAdoptRef.current = null;
     }
     setShowCritiqueDrawer(true);
     try {
@@ -459,7 +464,7 @@ export const EditorView: React.FC = () => {
   const handleAdoptRewrite = (item: DraftParagraphCritique) => {
     const suggestion = item.rewrite_suggestion;
     if (!suggestion || blockWhileWritingCurrentChapter()) return;
-    const result = adoptRewrite(draftContent, item.paragraph_text, suggestion);
+    const result = adoptRewrite(draftContent, item.paragraph_text, suggestion, item.index);
     setDraftContent(result.content);
     setAdoptedCritiques(prev => [...prev, item.index]);
     if (result.appended) {
@@ -468,6 +473,37 @@ export const EditorView: React.FC = () => {
       setSaveToast(true);
       setTimeout(() => setSaveToast(false), 1500);
     }
+  };
+
+  // 一键采纳：本章所有未采纳的示范改写一次替换进正文，可整体撤销；找不到原文的不追加到章末，留给作者单独采纳
+  const handleAdoptAllRewrites = () => {
+    if (pendingCritiques.length === 0 || blockWhileWritingCurrentChapter()) return;
+    const result = adoptAllRewrites(draftContent, pendingCritiques);
+    const missingText = result.missing.length > 0
+      ? `第 ${result.missing.join('、')} 段的原文找不到了（可能已改动），这几条没有采纳，可单独点「采纳改写」追加到章末`
+      : '';
+    if (result.adopted.length === 0) {
+      showNotice('info', missingText);
+      return;
+    }
+    if (!applyAiTextToChapter(activeChapterId, result.content, 'replace', `一键采纳 ${result.adopted.length} 条改写`)) {
+      showNotice('info', '请先在左侧目录新建或选择一个章节');
+      return;
+    }
+    const notice = missingText ? `已采纳 ${result.adopted.length} 条；${missingText}` : '';
+    bulkAdoptRef.current = { edit: useNovelStore.getState().lastAiEdit, indexes: result.adopted, notice };
+    setAdoptedCritiques(prev => [...prev, ...result.adopted]);
+    if (notice) showNotice('info', notice);
+  };
+
+  const handleUndoAiEdit = () => {
+    const bulk = bulkAdoptRef.current;
+    if (bulk && bulk.edit === lastAiEdit) {
+      setAdoptedCritiques(prev => prev.filter(i => !bulk.indexes.includes(i)));
+      setNotice(prev => (prev?.text === bulk.notice ? null : prev)); // 「已采纳 N 条」已不成立，别的提示保留
+    }
+    bulkAdoptRef.current = null;
+    undoLastAiEdit();
   };
 
   // 6. AI 人设与世界观一致性冲突排查 (防吃设定)
@@ -1479,7 +1515,7 @@ export const EditorView: React.FC = () => {
             <span className="text-zinc-300">已完成「{lastAiEdit.label}」并写入本章。</span>
             <div className="flex items-center gap-1.5 shrink-0">
               <button
-                onClick={undoLastAiEdit}
+                onClick={handleUndoAiEdit}
                 className="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200"
               >
                 <Undo2 className="w-3.5 h-3.5" />
@@ -1565,11 +1601,26 @@ export const EditorView: React.FC = () => {
           {showCritiqueDrawer && !isZenMode && (
             <aside className="w-full sm:w-96 border-l border-zinc-800 bg-zinc-900 xl:bg-zinc-900/60 flex flex-col shrink-0 overflow-hidden absolute xl:relative inset-y-0 right-0 xl:inset-auto z-40 xl:z-auto shadow-2xl shadow-black/60 xl:shadow-none animate-slide-in-right motion-reduce:animate-none">
               <div className="h-11 border-b border-zinc-800 px-3 flex items-center justify-between bg-zinc-950">
-                <div className="flex items-center gap-1.5">
-                  <MessageSquareCode className="w-4 h-4 text-amber-400" />
-                  <span className="text-xs font-semibold text-zinc-200">白金主编逐段批注与改写</span>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <MessageSquareCode className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span className="text-xs font-semibold text-zinc-200 truncate">白金主编逐段批注与改写</span>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1 shrink-0">
+                  {pendingCritiques.length > 0 && (
+                    <button
+                      onClick={handleAdoptAllRewrites}
+                      disabled={isWritingCurrentChapter || isCritiquing}
+                      title={
+                        isWritingCurrentChapter ? aiWriteBusyTitle
+                          : isCritiquing ? '主编正在批注后面的段落，完成后可一键采纳'
+                          : `把 ${pendingCritiques.length} 条示范改写一次替换进正文，可撤销`
+                      }
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-zinc-950 text-[11px] font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500/20 disabled:hover:text-amber-300"
+                    >
+                      <CheckCheck className="w-3 h-3" />
+                      <span>一键采纳 {pendingCritiques.length}</span>
+                    </button>
+                  )}
                   {critiqueList.length > 0 && !isCritiquing && (
                     <button onClick={() => handleRunParagraphCritique()} className="text-[11px] text-zinc-400 hover:text-amber-300 px-2 py-1 rounded whitespace-nowrap">
                       重新批注
