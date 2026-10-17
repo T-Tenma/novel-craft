@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStoryContext, buildPreviousChapterContext, excerptHeadTail } from './storyContext.ts';
+import { buildStoryContext, buildPreviousChapterContext, buildReviewContext, excerptHeadTail } from './storyContext.ts';
 import type { CharacterItem, StoryVolume, WorldElement } from '../types';
 
 const chapter = (id: string, title: string, content: string) => ({ id, title, content, word_count: content.length, status: 'draft' as const });
@@ -41,11 +41,21 @@ test('buildPreviousChapterContext - gives the ending of the chapter just before,
   assert.equal(buildPreviousChapterContext(VOLUMES, 'missing'), '');
 });
 
-test('buildPreviousChapterContext - long previous chapters keep only their ending', () => {
-  const volumes = [{ ...VOLUMES[0], chapters: [chapter('a', '甲', '旧'.repeat(5000) + '结尾钩子'), chapter('b', '乙', '')] }];
+test('buildPreviousChapterContext - a long previous chapter keeps its opening and its ending', () => {
+  const volumes = [{ ...VOLUMES[0], chapters: [chapter('a', '甲', '锁心离体供在案上。' + '旧'.repeat(5000) + '结尾钩子'), chapter('b', '乙', '')] }];
   const ctx = buildPreviousChapterContext(volumes, 'b');
+  assert.match(ctx, /锁心离体供在案上/, 'events early in the previous chapter are still known');
+  assert.match(ctx, /中间省略/);
   assert.match(ctx, /结尾钩子$/);
-  assert.ok(ctx.length < 1500);
+  assert.ok(ctx.length < 3200);
+});
+
+test('buildPreviousChapterContext - a typical 3000-character chapter goes in whole', () => {
+  const content = '前段情节。' + '字'.repeat(2900) + '章末。';
+  const volumes = [{ ...VOLUMES[0], chapters: [chapter('a', '甲', content), chapter('b', '乙', '')] }];
+  const ctx = buildPreviousChapterContext(volumes, 'b');
+  assert.ok(ctx.includes(content));
+  assert.doesNotMatch(ctx, /省略/);
 });
 
 test('buildStoryContext - combines outline, characters, settings, chapter list and the previous ending', () => {
@@ -70,4 +80,43 @@ test('buildStoryContext - caps long outlines and long setting lists', () => {
   assert.ok(!ctx.includes('纲'.repeat(700)));
   assert.ok(!ctx.includes('欲'.repeat(100)));
   assert.ok(ctx.includes('角色11') && !ctx.includes('角色12'));
+});
+
+const REVIEW_VOLUMES: StoryVolume[] = [
+  {
+    id: 'v1',
+    title: '第一卷',
+    description: '',
+    chapters: [
+      chapter('r1', '第一章', '沈淮在祭坛醒来，方执事破空而至。'),
+      chapter('r2', '第二章', '诛绝禁制落下，八百里封山。'),
+    ],
+  },
+];
+const REVIEW_CHARACTERS: CharacterItem[] = [
+  { name: '沈淮', status: '已有角色', role: '男主', key_action: '', inner_motivation: '护住残宗' },
+  { name: '方执事（方秉诚）', status: '已有角色', role: '玄镜司执事', key_action: '', inner_motivation: '夺锁' },
+  { name: '冷面剑卫', status: '退场/阵亡', role: '剑卫', key_action: '', inner_motivation: '' },
+];
+const REVIEW_WORLD: WorldElement[] = [{ term: '诛绝禁制', category: '法则规则', description: '封山杀阵' }];
+
+test('buildReviewContext - settings not yet named by this chapter are marked as possibly later, so the review does not ask for them', () => {
+  const ctx = buildReviewContext({ volumes: REVIEW_VOLUMES, chapterId: 'r1', characters: REVIEW_CHARACTERS, worldElements: REVIEW_WORLD });
+  assert.match(ctx, /沈淮\(男主, 动机:护住残宗\);/);
+  assert.match(ctx, /方执事（方秉诚）\(玄镜司执事, 动机:夺锁\);/, 'either spelling of a name counts as appeared');
+  assert.match(ctx, /冷面剑卫\(剑卫\)【已退场\/阵亡】【前文未见，可能是后文设定】/);
+  assert.match(ctx, /诛绝禁制\(封山杀阵\)【前文未见，可能是后文设定】/);
+  assert.match(ctx, /本章没写到不算缺失/);
+  assert.match(ctx, /退场之前的章节[^。]*不算问题/, 'a death later in the book does not make an earlier appearance wrong');
+});
+
+test('buildReviewContext - a setting named in this chapter or earlier is not marked', () => {
+  const ctx = buildReviewContext({ volumes: REVIEW_VOLUMES, chapterId: 'r2', characters: [], worldElements: REVIEW_WORLD });
+  assert.equal(ctx, '【核心设定法则】：诛绝禁制(封山杀阵)', 'no notes without marked entries');
+});
+
+test('buildReviewContext - no settings, no context; an unknown chapter marks nothing', () => {
+  assert.equal(buildReviewContext({ volumes: REVIEW_VOLUMES, chapterId: 'r1', characters: [], worldElements: [] }), '');
+  const ctx = buildReviewContext({ volumes: REVIEW_VOLUMES, chapterId: 'missing', characters: [], worldElements: REVIEW_WORLD });
+  assert.doesNotMatch(ctx, /后文设定/);
 });

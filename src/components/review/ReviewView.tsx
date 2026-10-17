@@ -6,6 +6,7 @@ import { getChapterReview } from '../../utils/chapterReview';
 import { copyText } from '../../utils/clipboard';
 import { chapterTitleOrDefault } from '../../stores/chapterOps';
 import { NO_API_KEY_MESSAGE, formatActionError } from '../../services/llmErrors';
+import { buildReviewContext } from '../../utils/storyContext';
 import { 
   CheckCircle2, 
   AlertTriangle, 
@@ -65,8 +66,8 @@ export const ReviewView: React.FC = () => {
     setIsReviewing(true);
     setErrorMsg('');
     try {
-      // 携带当前维护的角色动机与世界观背景作为评审基准
-      const contextHint = `【小说角色动机】：${myCharacters.map(c => `${c.name}(${c.role}, 动机:${c.inner_motivation})`).join('; ')}\n【核心设定法则】：${myWorldElements.map(w => `${w.term}(${w.description})`).join('; ')}`;
+      // 携带当前维护的角色动机与世界观背景作为评审基准；到本章还没出现的设定会标明，免得早先的章节被要求写后文的设定
+      const contextHint = buildReviewContext({ volumes, chapterId, characters: myCharacters, worldElements: myWorldElements });
       const report = await reviewDraftWithLLM(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftTitle,

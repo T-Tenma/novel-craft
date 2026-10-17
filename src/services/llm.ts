@@ -551,7 +551,7 @@ export async function diagnoseDraftRealtime(
   "pacing_status": "节奏紧凑",
   "instant_feedback": "前200字危机到位，但第3段出现了较长的世界观说明，建议精简并转化为主角的动作观察。"
 }
-判断章末钩子（hook_detected）和断章时，以正文最后一段为准。`;
+判断章末钩子（hook_detected）和断章时，以正文最后一段为准。章末不一定是悬念：最后一段是平静收尾、尾声或情绪落点时，照实评它收得有没有余味，hook_detected 为 false，不要把收尾说成悬念断章，也不要只因没留悬念扣分——收束全卷或全书的一章本就该收住。`;
 
   const truncated = currentDraft.length > DIAGNOSIS_MAX_CHARS;
   const userPrompt = `参考的目标节奏与手法：\n${referenceBeat}\n\n作者当前正文（共 ${countChars(currentDraft)} 字${truncated ? '，过长已省略中段，最后一段即章末' : ''}）：\n${excerptHeadTail(currentDraft, DIAGNOSIS_MAX_CHARS)}`;
@@ -643,7 +643,7 @@ export interface ConsistencyCheckReport {
 export async function checkDraftConsistency(
   config: LLMConfig,
   draftContent: string,
-  characters: Array<{ name: string; role: string; inner_motivation: string; key_action: string }>,
+  characters: Array<{ name: string; role: string; inner_motivation: string; key_action: string; status?: string }>,
   worldElements: Array<{ term: string; category: string; description: string }>,
   storyContext = ''
 ): Promise<ConsistencyCheckReport> {
@@ -652,6 +652,7 @@ export async function checkDraftConsistency(
 1. 角色言行是否与核心动机、身份定位相背离（如：谨慎内敛的主角突然无脑降智装逼）？
 2. 是否违背了力量法则机制或金手指代价（如：设定了用一次扣除情感算力，但正文无视代价随意连续开挂）？
 3. 是否存在前后逻辑冲突或道具机制自相矛盾？
+4. status 是人物在全书最新进度里的状态。「退场/阵亡」的人物，前文或本章交代其死亡、退场之后不应再以活人身份出场（回忆、尸体、魂魄等除外）；退场之前的情节里照常出场不算冲突。
 注意：人设矩阵和世界观只记录了部分信息。正文里出现、设定里没写的人物、道具或事件，可能是前文已经交代过的，不要仅因设定里没写就判为冲突；只报告与给出的设定、前文结尾或本章前后文明确矛盾的地方。
 
 严格以纯 JSON 格式输出（无 markdown 反引号）：

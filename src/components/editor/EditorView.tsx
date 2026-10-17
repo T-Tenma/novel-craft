@@ -14,6 +14,9 @@ import {
   ConsistencyCheckReport
 } from '../../services/llm';
 import { CharacterItem, WorldElement, DraftParagraphCritique } from '../../types';
+
+// 人物卡状态；「退场/阵亡」会写进 AI 前情与防吃设定，免得把死去的人物写活
+const CHARACTER_STATUSES: CharacterItem['status'][] = ['新登场', '已有角色', '退场/阵亡'];
 import { ExportProjectModal } from './ExportProjectModal';
 import { ConsistencyReportBanner } from './ConsistencyReportBanner';
 import { VolumeFormModal } from './VolumeFormModal';
@@ -233,7 +236,7 @@ export const EditorView: React.FC = () => {
 
   const referenceBeatText = currentAnalysis 
     ? `参考章节：${currentAnalysis.chapter_title}\n事件摘要：${currentAnalysis.summary}\n黄金钩子：${currentAnalysis.narrative_hook}\n技法手记：${currentAnalysis.technique_notes}`
-    : '遵循网文黄金开局法则：前300字建立致命危机，杜绝说明性灌水，末尾抛出强悬念。';
+    : '遵循网文黄金开局法则：前300字建立致命危机，杜绝说明性灌水，末尾抛出强悬念（收束全卷或全书的一章按大纲收住即可）。';
 
   // 绑定全局键盘快捷键
   useEffect(() => {
@@ -483,7 +486,7 @@ export const EditorView: React.FC = () => {
       const report = await checkDraftConsistency(
         { baseUrl: apiBaseUrl, apiKey, model: modelName },
         draftContent,
-        myCharacters.map(c => ({ name: c.name, role: c.role, inner_motivation: c.inner_motivation, key_action: c.key_action })),
+        myCharacters.map(c => ({ name: c.name, role: c.role, status: c.status, inner_motivation: c.inner_motivation, key_action: c.key_action })),
         myWorldElements.map(w => ({ term: w.term, category: w.category, description: w.description })),
         buildPreviousChapterContext(volumes, chapterId)
       );
@@ -970,6 +973,14 @@ export const EditorView: React.FC = () => {
                       onChange={(e) => setCharForm({ ...charForm, role: e.target.value })}
                       className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs"
                     />
+                    <select
+                      aria-label="角色状态"
+                      value={charForm.status}
+                      onChange={(e) => setCharForm({ ...charForm, status: e.target.value as CharacterItem['status'] })}
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs"
+                    >
+                      {CHARACTER_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
                     <textarea
                       rows={2}
                       placeholder="开篇核心行动"
@@ -1021,6 +1032,7 @@ export const EditorView: React.FC = () => {
                         <span>{c.name}</span>
                         <PenTool className="w-2.5 h-2.5 opacity-40 group-hover:opacity-100 text-amber-400" />
                       </button>
+                      {c.status === '退场/阵亡' && <span className="mr-auto ml-1.5 text-[10px] text-zinc-500">已退场/阵亡</span>}
                       <div className="flex items-center gap-1">
                         <button
                           onClick={() => {

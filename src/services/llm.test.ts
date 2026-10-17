@@ -180,6 +180,21 @@ test('diagnoseDraftRealtime - a long chapter is judged with its ending, not only
   assert.match(user, /共 3008 字/);
 });
 
+test('diagnoseDraftRealtime - a calm ending is judged as an ending, not praised as a cliffhanger', async () => {
+  const { system } = await captureRequest(JSON.stringify({ match_score: 80, tension_score: 4, instant_feedback: 'ok' }), () =>
+    diagnoseDraftRealtime(CONFIG, '尾声。', '参考'));
+  assert.match(system, /平静收尾[^。]*不要[^。]*悬念/);
+});
+
+test('checkDraftConsistency - sends character status so the dead are not brought back', async () => {
+  const characters = [{ name: '冷面剑卫', status: '退场/阵亡', role: '剑卫', inner_motivation: '', key_action: '' }];
+  const { system, user } = await captureRequest(JSON.stringify({ consistency_score: 90, conflicts: [] }), () =>
+    checkDraftConsistency(CONFIG, '剑卫又提剑杀来。', characters, []));
+  assert.match(user, /退场\/阵亡/);
+  assert.match(system, /退场\/阵亡[^。]*不应/);
+  assert.match(system, /退场之前[^。]*不算冲突/, 'status is the latest state, so re-checking an earlier chapter does not flag the living character');
+});
+
 test('checkDraftConsistency - checks the end of long chapters and tells the model what came before', async () => {
   const draft = '甲'.repeat(7000) + '最后一段出了问题。';
   const { system, user } = await captureRequest(JSON.stringify({ consistency_score: 90, conflicts: [] }), () =>
