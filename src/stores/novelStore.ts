@@ -112,7 +112,7 @@ export interface NovelState {
   applyAiTextToChapter: (chapterId: string, text: string, mode: ChapterWriteMode, label: string) => boolean;
   undoLastAiEdit: () => void;
   dismissLastAiEdit: () => void;
-  updateChapterStatus: (chapterId: string, status: 'draft' | 'completed' | 'published') => void;
+  updateChapterStatus: (chapterId: string, status: 'draft' | 'completed') => void;
   deleteChapter: (chapterId: string) => void;
   // 撤销删除：放回原卷原位置；原卷不存在时返回 false
   restoreChapter: (volumeId: string, index: number, chapter: StoryChapter) => boolean;
@@ -121,7 +121,6 @@ export interface NovelState {
 
   // 场景化名家技法 Prompt 武器库
   prompts: TechniquePrompt[];
-  addPrompt: (prompt: TechniquePrompt) => void;
 
   // 🌟 名家文风矩阵（爱潜水的乌贼、季越人、熊狼狗、辰东、天蚕土豆）🌟
   authorStyles: AuthorStyle[];
@@ -456,7 +455,6 @@ const createNovelState: StateCreator<NovelState, [['zustand/persist', unknown]]>
 
   // 场景化技法 Prompt 武器库
   prompts: DEFAULT_PROMPT_ARSENAL,
-  addPrompt: (prompt) => set((s) => ({ prompts: [prompt, ...s.prompts] })),
 
   // 🌟 名家文风矩阵 🌟
   authorStyles: FAMOUS_AUTHOR_STYLES,

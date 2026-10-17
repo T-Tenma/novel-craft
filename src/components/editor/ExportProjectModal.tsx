@@ -19,7 +19,7 @@ interface Props {
 export const ExportProjectModal: React.FC<Props> = ({ onClose }) => {
   const dialogRef = useFocusTrap<HTMLDivElement>(true, onClose);
   const { volumes, myCharacters, myWorldElements, draftTitle, ideas, selectedIdeaId } = useNovelStore();
-  const [exportFormat, setExportFormat] = useState<'markdown' | 'txt' | 'dossier'>('markdown');
+  const [exportFormat, setExportFormat] = useState<'markdown' | 'txt'>('markdown');
   const [copyState, setCopyState] = useState<'idle' | 'done' | 'failed'>('idle');
   // 下载触发后提示文件名；浏览器不会回报是否保存成功，只能告知去哪里找
   const [downloadedName, setDownloadedName] = useState<string | null>(null);

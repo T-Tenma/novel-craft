@@ -96,8 +96,7 @@ export interface StoryChapter {
   title: string;
   content: string;
   word_count: number;
-  status: 'draft' | 'completed' | 'published';
-  target_words?: number;
+  status: 'draft' | 'completed';
   reference_chapter_id?: number;
 }
 
