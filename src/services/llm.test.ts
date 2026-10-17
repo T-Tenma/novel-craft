@@ -157,6 +157,14 @@ test('generateInspirationDraft - a later chapter picks up from the previous one'
   assert.match(system, /接上前一章/);
 });
 
+test('generateInspirationDraft - no forced cliffhanger and no new factions, so a finale can wrap up', async () => {
+  const { system } = await captureRequest('初稿', () =>
+    generateInspirationDraft(CONFIG, '第六章', '节拍', '', undefined, STORY_CONTEXT));
+  assert.doesNotMatch(system, /必须留下[^。]*致命悬念/);
+  assert.match(system, /收束[^。]*不要[^。]*新局/);
+  assert.match(system, /不要[^。]*新势力/);
+});
+
 test('polishStoryDraft - pins the length and the proper nouns of the original', async () => {
   const { system, user } = await captureRequest('润色稿', () => polishStoryDraft(CONFIG, '字'.repeat(2000)));
   assert.match(system + user, /2000 字/);
@@ -202,4 +210,13 @@ test('critiqueDraftParagraphsWithLLM - out-of-range or repeated model indexes fa
   const { result } = await captureRequest(reply, () => critiqueDraftParagraphsWithLLM(CONFIG, draft, '', undefined, 10));
   const indexes = (result as Array<{ index: number }>).map((r) => r.index);
   assert.deepEqual(indexes, [11, 12, 13, 14]);
+});
+
+test('critiqueDraftParagraphsWithLLM - rewrites see the story settings and must keep the facts of the paragraph', async () => {
+  const reply = JSON.stringify([{ index: 1, paragraph_text: '第一段。', grade: '合格', editor_comment: '平' }]);
+  const { system, user } = await captureRequest(reply, () =>
+    critiqueDraftParagraphsWithLLM(CONFIG, '第一段。', '', undefined, 0, STORY_CONTEXT));
+  assert.match(user, /门外的手指抠了进来/);
+  assert.match(system, /人名[^。]*数字[^。]*规则[^。]*照原段/);
+  assert.match(system, /原段没有的[^。]*不要添/);
 });

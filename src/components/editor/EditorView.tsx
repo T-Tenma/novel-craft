@@ -432,7 +432,8 @@ export const EditorView: React.FC = () => {
         draftContent,
         referenceBeatText,
         currentAuthorStyle,
-        startParagraph
+        startParagraph,
+        storyContextFor(chapterId)
       );
       const fresh = results.filter((r) => !previous.some((p) => p.index === r.index));
       setCritiqueResult({ chapterId, data: [...previous, ...fresh] });

@@ -300,7 +300,8 @@ export async function critiqueDraftParagraphsWithLLM(
   draftContent: string,
   referenceStyle?: string,
   authorStyle?: AuthorStyle,
-  startParagraph = 0
+  startParagraph = 0,
+  storyContext = ''
 ): Promise<DraftParagraphCritique[]> {
   // 每次批一批（startParagraph 起的 CRITIQUE_BATCH_SIZE 段），模型按批内 1 起编号，返回后换算成全章段号
   const paragraphs = splitParagraphs(draftContent).slice(startParagraph, startParagraph + CRITIQUE_BATCH_SIZE);
@@ -318,6 +319,7 @@ ${styleContext}
 1. 评定等级：'优秀·黄金段' | '合格·推进平稳' | '硬伤·拖沓灌水' | '出戏·人设矛盾'；
 2. 主编点评：极其一针见血，毫不客气地指出这段写得好在何处，或者存在什么废话、说明文倒灌、动机不清等硬伤，尤其是是否具备所选作家的神髓；
 3. 精修改写建议：若有不足，给出 1-2 句完全符合该白金作家笔触的高质感改写示范！rewrite_suggestion 会被直接替换进正文，只写改写后的正文，不加任何前缀标签。
+4. 改写只换笔法：人名、称谓、数字、时间、地点、规则与因果一律照原段，原段交代的规则、代价等信息不能删；原段没有的人物、数字和设定不要添。${storyContext ? '判断「人设矛盾」以【前情与设定】为准。' : ''}
 
 严格以纯 JSON 数组格式输出（无 markdown 反引号）：
 [
@@ -330,7 +332,7 @@ ${styleContext}
   }
 ]`;
 
-  const userPrompt = `待点评正文段落列表：\n${JSON.stringify(paragraphs)}`;
+  const userPrompt = `${storyContext ? `【前情与设定】\n${storyContext}\n\n` : ''}待点评正文段落列表：\n${JSON.stringify(paragraphs)}`;
 
   const raw = await callLLM(config, systemPrompt, userPrompt);
   let parsed: unknown;
@@ -462,8 +464,9 @@ ${styleInstruction}
 写作通用原则：
 1. 坚决杜绝开头倒灌设定说明文，前三句话直接将主角推进致命危机或强烈冲突的第一现场！
 2. 调动感官细节（光线、气味、生理刺痛、冷汗），营造强烈的沉浸感与压迫感。
-3. 行文末尾必须留下一个让读者不得不翻下一页的致命悬念（Hook）！${storyContext ? `
-4. 这是接续前文的一章：开头要接上前一章结尾，人名、称谓、地名、道具与规则一律沿用【前情与设定】，不要另起炉灶，也不要给人物改名。` : ''}
+3. 章末收在让读者想翻下一页的点上（悬念、反转或情绪落点皆可）；按大纲这一章是收束全卷或全书时，把已有矛盾收住，不要为了留悬念再开新局。${storyContext ? `
+4. 这是接续前文的一章：开头要接上前一章结尾，人名、称谓、地名、道具与规则一律沿用【前情与设定】，不要另起炉灶，也不要给人物改名。
+5. 冲突从已有人物和矛盾里来，不要擅自引入设定里没有的新势力、新组织或新的主线谜团。` : ''}
 直接输出小说正文。`;
 
   const userPrompt = `${storyContext ? `【前情与设定】\n${storyContext}\n\n` : ''}章节标题：${title}\n立项脑洞背景：${ideaContext || '赛博修真/现代超自然悬疑'}\n参考的名作结构与节拍：\n${referenceBeat}\n\n请直接输出小说正文：`;
